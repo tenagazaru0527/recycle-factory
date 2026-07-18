@@ -266,7 +266,7 @@ function assertSlot(slot) {
   if (!ALL_SLOTS.includes(slot)) throw new Error(`Unknown investment slot: ${slot}`);
 }
 
-module.exports = {
+const exportedGameCore = {
   ALL_SLOTS,
   BUFFER_SLOTS,
   DEFAULT_CONFIG,
@@ -283,3 +283,6 @@ module.exports = {
   createGame,
   tick,
 };
+
+if (typeof module !== 'undefined' && module.exports) module.exports = exportedGameCore;
+if (typeof window !== 'undefined') window.GameCore = exportedGameCore;
