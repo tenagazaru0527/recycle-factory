@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Recycle Factory Debug UI</title>
+  </head>
+  <body>
+    <main>
+      <h1>Recycle Factory Debug UI</h1>
+      <p id="message" role="status"></p>
+      <section>
+        <button type="button" data-action="start">開始</button>
+        <button type="button" data-action="stop">停止</button>
+        <button type="button" data-action="advance">10秒進める</button>
+        <button type="button" data-action="reset">リセット</button>
+      </section>
+      <section>
+        <h2>状態</h2>
+        <dl id="state"></dl>
+      </section>
+      <section>
+        <h2>投資</h2>
+        <div id="investments"></div>
+      </section>
+    </main>
+    <script src="game-core.js"></script>
+    <script src="debug-ui.js"></script>
+  </body>
+</html>
