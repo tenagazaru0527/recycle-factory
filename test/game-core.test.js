@@ -6,8 +6,9 @@ const {
   ROUND_MODIFIERS,
   RUN_DURATION_MS,
   buyNew,
-  buySecondaryProcessor,
   buyUpgrade,
+  cancelSecondaryReservation,
+  reserveSecondaryProcessor,
   calculateNewCost,
   calculateUpgradeCost,
   createGame,
@@ -94,12 +95,12 @@ function closeTo(actual, expected, message) {
     secondaryProcessorRatePerSecond: 1,
   });
   assert.ok(ROUND_MODIFIERS.includes(game.state.roundModifier));
-  assert.equal(buySecondaryProcessor(game), game.config.secondaryProcessorCost);
+  game.state.secondaryProcessor.purchased = true;
   game.state.buffers.B = 1;
   tick(game, 1);
   closeTo(game.state.secondaryProcessor.refinedProducts, 0, 'shipping consumes refined product');
   closeTo(game.state.score, 3 * game.config.tickMs / 1000, 'secondary processor triples refined unit value');
-  assert.throws(() => buySecondaryProcessor(game), /already purchased/);
+  assert.throws(() => reserveSecondaryProcessor(game, 0.50), /already purchased/);
 }
 
 {
@@ -111,7 +112,7 @@ function closeTo(actual, expected, message) {
     secondaryProcessorRatePerSecond: 10,
     secondaryProcessorBufferCapacity: 0.05,
   });
-  buySecondaryProcessor(game);
+  game.state.secondaryProcessor.purchased = true;
   game.state.buffers.B = 1;
   tick(game, 1);
   closeTo(game.state.secondaryProcessor.refinedProducts, 0.05, 'refined buffer fills to its capacity');
@@ -122,6 +123,57 @@ function closeTo(actual, expected, message) {
   tick(game, 1);
   closeTo(game.state.buffers.B, 0.90, 'normal products ship while the refined buffer starts full');
   closeTo(game.state.score, 0.20, 'shipping prioritizes refined products before normal products');
+}
+
+{
+  const game = createGame({
+    initialMoney: 100,
+    roundModifier: 'fastRamp',
+    stageTypes: { collection: 'metal', processing: 'metal', shipping: 'plastic' },
+  });
+  assert.throws(() => reserveSecondaryProcessor(game, 0.30), /Unknown reserve rate/);
+  assert.throws(() => cancelSecondaryReservation(game), /not reserved/);
+  reserveSecondaryProcessor(game, 0.25);
+  assert.equal(game.state.secondaryProcessor.reserved, true, 'reservation state is exposed');
+  assert.equal(game.state.secondaryProcessor.reserveRate, 0.25, 'selected rate is exposed');
+  assert.throws(() => reserveSecondaryProcessor(game, 0.50), /already reserved/);
+
+  const moneyBefore = game.state.money;
+  game.state.buffers.B = 1;
+  tick(game, 1);
+  const income = game.config.tickMs / 1000;
+  closeTo(game.state.score, income, 'score counts the full shipping income');
+  closeTo(game.state.secondaryProcessor.savedAmount, income * 0.25, 'reservation withholds the selected rate');
+  closeTo(game.state.money, moneyBefore + income * 0.75, 'remaining income goes to money');
+
+  buyNew(game, 'bufferA');
+  assert.equal(game.state.newPurchaseCounts.bufferA, 1, 'normal investment stays possible while saving');
+
+  const savedBefore = game.state.secondaryProcessor.savedAmount;
+  const moneyBeforeCancel = game.state.money;
+  cancelSecondaryReservation(game);
+  closeTo(game.state.money, moneyBeforeCancel + savedBefore, 'cancelling refunds the full savings');
+  assert.equal(game.state.secondaryProcessor.reserved, false);
+  assert.equal(game.state.secondaryProcessor.reserveRate, null);
+  assert.equal(game.state.secondaryProcessor.savedAmount, 0);
+}
+
+{
+  const game = createGame({
+    initialMoney: 0,
+    roundModifier: 'fastRamp',
+    stageTypes: { collection: 'metal', processing: 'metal', shipping: 'plastic' },
+    secondaryProcessorCost: 0.04,
+  });
+  reserveSecondaryProcessor(game, 0.50);
+  game.state.buffers.B = 1;
+  tick(game, 1);
+  const income = game.config.tickMs / 1000;
+  assert.equal(game.state.secondaryProcessor.purchased, true, 'full savings auto-purchase the processor');
+  assert.equal(game.state.secondaryProcessor.reserved, false, 'reservation ends after auto-purchase');
+  assert.equal(game.state.secondaryProcessor.savedAmount, 0);
+  closeTo(game.state.money, income - 0.04, 'excess savings return to money after auto-purchase');
+  closeTo(game.state.score, income, 'auto-purchase never reduces score');
 }
 
 {
