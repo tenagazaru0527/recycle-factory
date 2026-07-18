@@ -11,6 +11,7 @@ const RAMP_DURATION_MS = 60 * 1000;
 const BUFFER_SLOTS = new Set(['bufferA', 'bufferB']);
 const MACHINE_SLOTS = new Set(['collection', 'processing', 'shipping']);
 const ALL_SLOTS = [...MACHINE_SLOTS, ...BUFFER_SLOTS];
+const ROUND_MODIFIERS = Object.freeze(['fastRamp', 'compactBuffers', 'gentleNewCosts']);
 
 // Balance values marked "仮" in design-v0.2 §3 are deliberately configurable.
 const DEFAULT_CONFIG = Object.freeze({
@@ -33,6 +34,19 @@ const DEFAULT_CONFIG = Object.freeze({
   upgradeCostBase: Object.freeze({ collection: 20, processing: 25, shipping: 20 }),
   newCostGrowth: 1.15,
   upgradeRateBonus: 0.10,
+  stageTypes: Object.freeze({ collection: 'metal', processing: 'plastic', shipping: 'glass' }),
+  unifiedNewCostDiscount: 0.20,
+  unifiedRampDurationMultiplier: 0.5,
+  mixedUnitPriceBonus: 0.40,
+  secondaryProcessorCost: 200,
+  secondaryProcessorRatePerSecond: 1,
+  secondaryProcessorPriceMultiplier: 3,
+  roundModifier: null,
+  random: Math.random,
+  fastRampDurationMultiplier: 0.5,
+  compactBufferCapacityMultiplier: 0.7,
+  compactBufferUnitPriceBonus: 0.30,
+  gentleNewCostGrowth: 1.10,
 });
 
 function mergeConfig(overrides = {}) {
@@ -43,21 +57,32 @@ function mergeConfig(overrides = {}) {
     baseRatePerSecond: { ...DEFAULT_CONFIG.baseRatePerSecond, ...overrides.baseRatePerSecond },
     newCostBase: { ...DEFAULT_CONFIG.newCostBase, ...overrides.newCostBase },
     upgradeCostBase: { ...DEFAULT_CONFIG.upgradeCostBase, ...overrides.upgradeCostBase },
+    stageTypes: { ...DEFAULT_CONFIG.stageTypes, ...overrides.stageTypes },
   };
 }
 
 function createGame(configOverrides) {
   const config = mergeConfig(configOverrides);
+  const synergy = determineSynergy(config.stageTypes);
+  const roundModifier = selectRoundModifier(config);
+  const capacityMultiplier = roundModifier === 'compactBuffers'
+    ? config.compactBufferCapacityMultiplier : 1;
   const state = {
     elapsedMs: 0,
     money: config.initialMoney,
     score: 0,
     buffers: { A: 0, B: 0 },
-    capacities: { A: config.bufferCapacity, B: config.bufferCapacity },
+    capacities: {
+      A: config.bufferCapacity * capacityMultiplier,
+      B: config.bufferCapacity * capacityMultiplier,
+    },
     machines: { ...config.initialMachines },
     upgrades: { collection: [], processing: [], shipping: [] },
     newPurchaseCounts: Object.fromEntries(ALL_SLOTS.map((slot) => [slot, 0])),
     statuses: { collection: 'starved', processing: 'starved', shipping: 'starved' },
+    synergy,
+    roundModifier,
+    secondaryProcessor: { purchased: false, refinedProducts: 0 },
     finished: false,
   };
 
@@ -66,7 +91,8 @@ function createGame(configOverrides) {
 
 function enhancementMultiplier(game, slot) {
   const { upgrades } = game.state;
-  const { rampDurationMs, upgradeRateBonus } = game.config;
+  const { upgradeRateBonus } = game.config;
+  const rampDurationMs = effectiveRampDurationMs(game);
   const bonus = upgrades[slot].reduce(
     (sum, upgrade) => sum + upgradeRateBonus * Math.min(1, upgrade.elapsedMs / rampDurationMs),
     0,
@@ -75,7 +101,7 @@ function enhancementMultiplier(game, slot) {
 }
 
 function isRamping(game, slot) {
-  const { rampDurationMs } = game.config;
+  const rampDurationMs = effectiveRampDurationMs(game);
   return game.state.upgrades[slot].some((upgrade) => upgrade.elapsedMs < rampDurationMs);
 }
 
@@ -87,8 +113,11 @@ function machineRate(game, slot) {
 
 function calculateNewCost(game, slot) {
   assertSlot(slot);
-  const { newCostBase, newCostGrowth } = game.config;
-  return newCostBase[slot] * (newCostGrowth ** game.state.newPurchaseCounts[slot]);
+  const { newCostBase, unifiedNewCostDiscount, gentleNewCostGrowth } = game.config;
+  const newCostGrowth = game.state.roundModifier === 'gentleNewCosts'
+    ? gentleNewCostGrowth : game.config.newCostGrowth;
+  const synergyMultiplier = game.state.synergy === 'unified' ? 1 - unifiedNewCostDiscount : 1;
+  return newCostBase[slot] * synergyMultiplier * (newCostGrowth ** game.state.newPurchaseCounts[slot]);
 }
 
 function calculateUpgradeCost(game, slot) {
@@ -117,6 +146,13 @@ function buyUpgrade(game, slot) {
   spend(game, cost);
   game.state.upgrades[slot].push({ elapsedMs: 0 });
   return cost;
+}
+
+function buySecondaryProcessor(game) {
+  if (game.state.secondaryProcessor.purchased) throw new Error('Secondary processor is already purchased');
+  spend(game, game.config.secondaryProcessorCost);
+  game.state.secondaryProcessor.purchased = true;
+  return game.config.secondaryProcessorCost;
 }
 
 function tick(game, ticks = 1) {
@@ -153,11 +189,19 @@ function tickOnce(game) {
     state.statuses.processing = isRamping(game, 'processing') ? 'ramping' : 'running';
   }
 
-  const shippingAmount = Math.min(machineRate(game, 'shipping') * dtSeconds, state.buffers.B);
+  refineProducts(game, dtSeconds);
+
+  const shippingCapacity = machineRate(game, 'shipping') * dtSeconds;
+  const refinedShippingAmount = Math.min(shippingCapacity, state.secondaryProcessor.refinedProducts);
+  state.secondaryProcessor.refinedProducts -= refinedShippingAmount;
+  const shippingAmount = refinedShippingAmount + Math.min(shippingCapacity - refinedShippingAmount, state.buffers.B);
   if (shippingAmount <= 0) state.statuses.shipping = 'starved';
   else {
-    state.buffers.B -= shippingAmount;
-    const income = shippingAmount * config.unitPrice;
+    state.buffers.B -= shippingAmount - refinedShippingAmount;
+    const income = (
+      refinedShippingAmount * effectiveUnitPrice(game) * config.secondaryProcessorPriceMultiplier
+      + (shippingAmount - refinedShippingAmount) * effectiveUnitPrice(game)
+    );
     state.money += income;
     state.score += income;
     state.statuses.shipping = isRamping(game, 'shipping') ? 'ramping' : 'running';
@@ -165,6 +209,43 @@ function tickOnce(game) {
 
   state.elapsedMs += config.tickMs;
   state.finished = state.elapsedMs >= config.runDurationMs;
+}
+
+function determineSynergy(stageTypes) {
+  const types = Object.values(stageTypes);
+  if (new Set(types).size === 1) return 'unified';
+  if (new Set(types).size === types.length) return 'mixed';
+  return 'none';
+}
+
+function selectRoundModifier(config) {
+  if (config.roundModifier !== null) {
+    if (!ROUND_MODIFIERS.includes(config.roundModifier)) throw new Error(`Unknown round modifier: ${config.roundModifier}`);
+    return config.roundModifier;
+  }
+  return ROUND_MODIFIERS[Math.floor(config.random() * ROUND_MODIFIERS.length)];
+}
+
+function effectiveRampDurationMs(game) {
+  const { state, config } = game;
+  const synergyMultiplier = state.synergy === 'unified' ? config.unifiedRampDurationMultiplier : 1;
+  const roundMultiplier = state.roundModifier === 'fastRamp' ? config.fastRampDurationMultiplier : 1;
+  return config.rampDurationMs * synergyMultiplier * roundMultiplier;
+}
+
+function effectiveUnitPrice(game) {
+  const { state, config } = game;
+  let multiplier = state.synergy === 'mixed' ? 1 + config.mixedUnitPriceBonus : 1;
+  if (state.roundModifier === 'compactBuffers') multiplier *= 1 + config.compactBufferUnitPriceBonus;
+  return config.unitPrice * multiplier;
+}
+
+function refineProducts(game, dtSeconds) {
+  const { state, config } = game;
+  if (!state.secondaryProcessor.purchased) return;
+  const refinedAmount = Math.min(config.secondaryProcessorRatePerSecond * dtSeconds, state.buffers.B);
+  state.buffers.B -= refinedAmount;
+  state.secondaryProcessor.refinedProducts += refinedAmount;
 }
 
 function spend(game, cost) {
@@ -182,9 +263,11 @@ module.exports = {
   DEFAULT_CONFIG,
   MACHINE_SLOTS,
   RAMP_DURATION_MS,
+  ROUND_MODIFIERS,
   RUN_DURATION_MS,
   TICK_MS,
   buyNew,
+  buySecondaryProcessor,
   buyUpgrade,
   calculateNewCost,
   calculateUpgradeCost,

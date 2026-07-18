@@ -3,8 +3,10 @@
 const assert = require('node:assert/strict');
 const {
   RAMP_DURATION_MS,
+  ROUND_MODIFIERS,
   RUN_DURATION_MS,
   buyNew,
+  buySecondaryProcessor,
   buyUpgrade,
   calculateNewCost,
   calculateUpgradeCost,
@@ -53,6 +55,56 @@ function closeTo(actual, expected, message) {
   tick(game, (RAMP_DURATION_MS / game.config.tickMs) - 1);
   assert.equal(game.state.statuses.processing, 'running');
   assert.throws(() => buyUpgrade(game, 'bufferA'), /no machines/);
+}
+
+{
+  const game = createGame({
+    initialMoney: 1000,
+    stageTypes: { collection: 'metal', processing: 'metal', shipping: 'metal' },
+    roundModifier: 'gentleNewCosts',
+  });
+  assert.equal(game.state.synergy, 'unified');
+  closeTo(calculateNewCost(game, 'collection'), 20, 'unified discounts new costs');
+  buyUpgrade(game, 'collection');
+  tick(game, (RAMP_DURATION_MS * 0.5) / game.config.tickMs);
+  assert.equal(game.state.statuses.collection, 'running', 'unified halves upgrade ramp duration');
+  buyNew(game, 'collection');
+  closeTo(calculateNewCost(game, 'collection'), 22, 'gentle modifier changes new cost growth');
+}
+
+{
+  const game = createGame({
+    initialMoney: 1000,
+    stageTypes: { collection: 'metal', processing: 'plastic', shipping: 'glass' },
+    roundModifier: 'compactBuffers',
+    bufferCapacity: 100,
+  });
+  assert.equal(game.state.synergy, 'mixed');
+  assert.equal(game.state.capacities.A, 70);
+  game.state.buffers.B = 1;
+  tick(game, 1);
+  closeTo(game.state.score, 1.4 * 1.3 * game.config.tickMs / 1000, 'mixed and compact modifiers raise unit price');
+}
+
+{
+  const game = createGame({
+    initialMoney: 1000,
+    roundModifier: 'fastRamp',
+    stageTypes: { collection: 'metal', processing: 'metal', shipping: 'plastic' },
+    secondaryProcessorRatePerSecond: 1,
+  });
+  assert.ok(ROUND_MODIFIERS.includes(game.state.roundModifier));
+  assert.equal(buySecondaryProcessor(game), game.config.secondaryProcessorCost);
+  game.state.buffers.B = 1;
+  tick(game, 1);
+  closeTo(game.state.secondaryProcessor.refinedProducts, 0, 'shipping consumes refined product');
+  closeTo(game.state.score, 3 * game.config.tickMs / 1000, 'secondary processor triples refined unit value');
+  assert.throws(() => buySecondaryProcessor(game), /already purchased/);
+}
+
+{
+  const game = createGame({ random: () => 0.99 });
+  assert.equal(game.state.roundModifier, 'gentleNewCosts', 'round modifier is selected at run start');
 }
 
 console.log('game-core tests passed');
