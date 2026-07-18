@@ -4,7 +4,7 @@
   "private": true,
   "description": "12分ランの自動化リサイクル工場ゲーム",
   "scripts": {
-    "sim:log": "node -e \"console.log('simulator is not implemented yet')\"",
+    "sim:log": "node simulator.js",
     "test": "node test/game-core.test.js"
   }
 }
