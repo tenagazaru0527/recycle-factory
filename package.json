@@ -1,0 +1,10 @@
+{
+  "name": "recycle-factory",
+  "version": "0.1.0",
+  "private": true,
+  "description": "12分ランの自動化リサイクル工場ゲーム",
+  "scripts": {
+    "sim:log": "node -e \"console.log('simulator is not implemented yet')\"",
+    "test": "node -e \"console.log('tests are not implemented yet')\""
+  }
+}
