@@ -38,7 +38,7 @@ const DEFAULT_CONFIG = Object.freeze({
   unifiedNewCostDiscount: 0.20,
   unifiedRampDurationMultiplier: 0.5,
   mixedUnitPriceBonus: 0.40,
-  secondaryProcessorCost: 200,
+  secondaryProcessorCost: 250,
   secondaryProcessorRatePerSecond: 1,
   secondaryProcessorPriceMultiplier: 3,
   secondaryProcessorBufferCapacity: 10,
