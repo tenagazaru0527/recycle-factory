@@ -41,6 +41,7 @@ const DEFAULT_CONFIG = Object.freeze({
   secondaryProcessorCost: 200,
   secondaryProcessorRatePerSecond: 1,
   secondaryProcessorPriceMultiplier: 3,
+  secondaryProcessorBufferCapacity: 10,
   roundModifier: null,
   random: Math.random,
   fastRampDurationMultiplier: 0.5,
@@ -82,7 +83,11 @@ function createGame(configOverrides) {
     statuses: { collection: 'starved', processing: 'starved', shipping: 'starved' },
     synergy,
     roundModifier,
-    secondaryProcessor: { purchased: false, refinedProducts: 0 },
+    secondaryProcessor: {
+      purchased: false,
+      refinedProducts: 0,
+      refinedCapacity: config.secondaryProcessorBufferCapacity,
+    },
     finished: false,
   };
 
@@ -243,7 +248,11 @@ function effectiveUnitPrice(game) {
 function refineProducts(game, dtSeconds) {
   const { state, config } = game;
   if (!state.secondaryProcessor.purchased) return;
-  const refinedAmount = Math.min(config.secondaryProcessorRatePerSecond * dtSeconds, state.buffers.B);
+  const refinedAmount = Math.min(
+    config.secondaryProcessorRatePerSecond * dtSeconds,
+    state.buffers.B,
+    state.secondaryProcessor.refinedCapacity - state.secondaryProcessor.refinedProducts,
+  );
   state.buffers.B -= refinedAmount;
   state.secondaryProcessor.refinedProducts += refinedAmount;
 }

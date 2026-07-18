@@ -103,6 +103,28 @@ function closeTo(actual, expected, message) {
 }
 
 {
+  const game = createGame({
+    initialMoney: 1000,
+    initialMachines: { collection: 0, processing: 0, shipping: 0 },
+    roundModifier: 'fastRamp',
+    stageTypes: { collection: 'metal', processing: 'metal', shipping: 'plastic' },
+    secondaryProcessorRatePerSecond: 10,
+    secondaryProcessorBufferCapacity: 0.05,
+  });
+  buySecondaryProcessor(game);
+  game.state.buffers.B = 1;
+  tick(game, 1);
+  closeTo(game.state.secondaryProcessor.refinedProducts, 0.05, 'refined buffer fills to its capacity');
+  assert.equal(game.state.secondaryProcessor.refinedCapacity, 0.05, 'refined capacity is exposed in state');
+  closeTo(game.state.buffers.B, 0.95, 'refining stops at the full refined buffer');
+
+  game.state.machines.shipping = 1;
+  tick(game, 1);
+  closeTo(game.state.buffers.B, 0.90, 'normal products ship while the refined buffer starts full');
+  closeTo(game.state.score, 0.20, 'shipping prioritizes refined products before normal products');
+}
+
+{
   const game = createGame({ random: () => 0.99 });
   assert.equal(game.state.roundModifier, 'gentleNewCosts', 'round modifier is selected at run start');
 }
