@@ -5,12 +5,14 @@ const path = require('node:path');
 const core = require('./game-core');
 
 const BUFFER_CAPACITIES = [10, 20, 40];
-const TRIALS_PER_SCENARIO = 3;
+const TRIALS_PER_SCENARIO = 1;
+const PROBE_BUFFER_AMOUNT = 1_000_000;
 
 const STRATEGIES = {
   collectionFirst(game) {
     return buyFirstAvailable(game, [
-      ['new', 'collection'], ['new', 'processing'], ['new', 'shipping'],
+      ['new', 'collection'], ['new', 'bufferA'], ['new', 'processing'],
+      ['new', 'bufferB'], ['new', 'shipping'],
       ['upgrade', 'processing'], ['upgrade', 'shipping'], ['upgrade', 'collection'],
     ]);
   },
@@ -33,7 +35,56 @@ const STRATEGIES = {
       ['upgrade', 'processing'], ['new', 'collection'], ['upgrade', 'collection'],
     ]);
   },
+  bottleneckFollow(game) {
+    const bottleneck = Object.entries(measureEffectiveThroughputs(game))
+      .sort((left, right) => left[1] - right[1])[0][0];
+    if (bottleneck === 'bufferA' || bottleneck === 'bufferB') return tryPurchase(game, 'new', bottleneck);
+
+    const newCost = core.calculateNewCost(game, bottleneck);
+    const upgradeCost = core.calculateUpgradeCost(game, bottleneck);
+    return tryPurchase(game, newCost <= upgradeCost ? 'new' : 'upgrade', bottleneck);
+  },
 };
+
+function createProbe(game) {
+  return { config: game.config, state: structuredClone(game.state) };
+}
+
+function measureEffectiveThroughputs(game) {
+  const dtSeconds = game.config.tickMs / 1000;
+  const collection = createProbe(game);
+  collection.state.buffers.A = 0;
+  collection.state.capacities.A = PROBE_BUFFER_AMOUNT;
+  collection.state.machines.processing = 0;
+  collection.state.machines.shipping = 0;
+  core.tick(collection);
+
+  const processing = createProbe(game);
+  processing.state.buffers.A = PROBE_BUFFER_AMOUNT;
+  processing.state.buffers.B = 0;
+  processing.state.capacities.B = PROBE_BUFFER_AMOUNT;
+  processing.state.machines.collection = 0;
+  processing.state.machines.shipping = 0;
+  core.tick(processing);
+
+  const shipping = createProbe(game);
+  shipping.state.buffers.B = PROBE_BUFFER_AMOUNT;
+  shipping.state.buffers.A = 0;
+  shipping.state.machines.collection = 0;
+  shipping.state.machines.processing = 0;
+  shipping.state.secondaryProcessor.purchased = false;
+  shipping.state.secondaryProcessor.refinedProducts = 0;
+  const shippingBefore = shipping.state.buffers.B;
+  core.tick(shipping);
+
+  return {
+    collection: collection.state.buffers.A / dtSeconds,
+    bufferA: (game.state.capacities.A - game.state.buffers.A) / dtSeconds,
+    processing: processing.state.buffers.B / dtSeconds,
+    bufferB: (game.state.capacities.B - game.state.buffers.B) / dtSeconds,
+    shipping: (shippingBefore - shipping.state.buffers.B) / dtSeconds,
+  };
+}
 
 function buyFirstAvailable(game, actions) {
   for (const [kind, slot] of actions) {
