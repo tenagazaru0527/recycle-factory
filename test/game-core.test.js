@@ -177,6 +177,29 @@ function closeTo(actual, expected, message) {
 }
 
 {
+  const game = createGame({
+    initialMoney: 0,
+    initialMachines: { collection: 0, processing: 0, shipping: 0 },
+    roundModifier: 'fastRamp',
+    stageTypes: { collection: 'metal', processing: 'metal', shipping: 'plastic' },
+    secondaryProcessorBufferCapacity: 0.05,
+  });
+  assert.equal(game.state.statuses.secondary, null, 'unpurchased secondary has null status');
+  reserveSecondaryProcessor(game, 0.25);
+  tick(game, 1);
+  assert.equal(game.state.statuses.secondary, null, 'reserved secondary keeps null status');
+  cancelSecondaryReservation(game);
+  game.state.secondaryProcessor.purchased = true;
+  tick(game, 1);
+  assert.equal(game.state.statuses.secondary, 'starved', 'empty bufferB starves the secondary');
+  game.state.buffers.B = 1;
+  tick(game, 1);
+  assert.equal(game.state.statuses.secondary, 'running', 'refining marks the secondary running');
+  tick(game, 1);
+  assert.equal(game.state.statuses.secondary, 'blocked', 'full refined buffer blocks the secondary');
+}
+
+{
   const game = createGame({ random: () => 0.99 });
   assert.equal(game.state.roundModifier, 'gentleNewCosts', 'round modifier is selected at run start');
 }

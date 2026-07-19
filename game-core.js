@@ -81,7 +81,7 @@ function createGame(configOverrides) {
     machines: { ...config.initialMachines },
     upgrades: { collection: [], processing: [], shipping: [] },
     newPurchaseCounts: Object.fromEntries(ALL_SLOTS.map((slot) => [slot, 0])),
-    statuses: { collection: 'starved', processing: 'starved', shipping: 'starved' },
+    statuses: { collection: 'starved', processing: 'starved', shipping: 'starved', secondary: null },
     synergy,
     roundModifier,
     secondaryProcessor: {
@@ -264,14 +264,23 @@ function effectiveUnitPrice(game) {
 
 function refineProducts(game, dtSeconds) {
   const { state, config } = game;
-  if (!state.secondaryProcessor.purchased) return;
-  const refinedAmount = Math.min(
-    config.secondaryProcessorRatePerSecond * dtSeconds,
-    state.buffers.B,
-    state.secondaryProcessor.refinedCapacity - state.secondaryProcessor.refinedProducts,
-  );
-  state.buffers.B -= refinedAmount;
-  state.secondaryProcessor.refinedProducts += refinedAmount;
+  const secondary = state.secondaryProcessor;
+  if (!secondary.purchased) {
+    state.statuses.secondary = null;
+    return;
+  }
+  if (state.buffers.B <= 0) state.statuses.secondary = 'starved';
+  else if (secondary.refinedCapacity - secondary.refinedProducts <= 0) state.statuses.secondary = 'blocked';
+  else {
+    const refinedAmount = Math.min(
+      config.secondaryProcessorRatePerSecond * dtSeconds,
+      state.buffers.B,
+      secondary.refinedCapacity - secondary.refinedProducts,
+    );
+    state.buffers.B -= refinedAmount;
+    secondary.refinedProducts += refinedAmount;
+    state.statuses.secondary = 'running';
+  }
 }
 
 // Score always counts the full shipping income (§3.7); the reservation only
