@@ -38,10 +38,11 @@ const DEFAULT_CONFIG = Object.freeze({
   unifiedNewCostDiscount: 0.20,
   unifiedRampDurationMultiplier: 0.5,
   mixedUnitPriceBonus: 0.40,
-  secondaryProcessorCost: 200,
+  secondaryProcessorCost: 250,
   secondaryProcessorRatePerSecond: 1,
-  secondaryProcessorPriceMultiplier: 3,
+  secondaryProcessorPriceMultiplier: 4,
   secondaryProcessorBufferCapacity: 10,
+  secondaryProcessorReserveRates: Object.freeze([0.25, 0.50]),
   roundModifier: null,
   random: Math.random,
   fastRampDurationMultiplier: 0.5,
@@ -87,6 +88,9 @@ function createGame(configOverrides) {
       purchased: false,
       refinedProducts: 0,
       refinedCapacity: config.secondaryProcessorBufferCapacity,
+      reserved: false,
+      reserveRate: null,
+      savedAmount: 0,
     },
     finished: false,
   };
@@ -153,11 +157,25 @@ function buyUpgrade(game, slot) {
   return cost;
 }
 
-function buySecondaryProcessor(game) {
-  if (game.state.secondaryProcessor.purchased) throw new Error('Secondary processor is already purchased');
-  spend(game, game.config.secondaryProcessorCost);
-  game.state.secondaryProcessor.purchased = true;
-  return game.config.secondaryProcessorCost;
+// §3.5 積立予約: the secondary processor is acquired via reservation, never bought outright.
+function reserveSecondaryProcessor(game, reserveRate) {
+  const secondary = game.state.secondaryProcessor;
+  if (secondary.purchased) throw new Error('Secondary processor is already purchased');
+  if (secondary.reserved) throw new Error('Secondary processor is already reserved');
+  if (!game.config.secondaryProcessorReserveRates.includes(reserveRate)) {
+    throw new Error(`Unknown reserve rate: ${reserveRate}`);
+  }
+  secondary.reserved = true;
+  secondary.reserveRate = reserveRate;
+}
+
+function cancelSecondaryReservation(game) {
+  const secondary = game.state.secondaryProcessor;
+  if (!secondary.reserved) throw new Error('Secondary processor is not reserved');
+  game.state.money += secondary.savedAmount;
+  secondary.reserved = false;
+  secondary.reserveRate = null;
+  secondary.savedAmount = 0;
 }
 
 function tick(game, ticks = 1) {
@@ -207,8 +225,7 @@ function tickOnce(game) {
       refinedShippingAmount * effectiveUnitPrice(game) * config.secondaryProcessorPriceMultiplier
       + (shippingAmount - refinedShippingAmount) * effectiveUnitPrice(game)
     );
-    state.money += income;
-    state.score += income;
+    applyIncome(game, income);
     state.statuses.shipping = isRamping(game, 'shipping') ? 'ramping' : 'running';
   }
 
@@ -257,6 +274,28 @@ function refineProducts(game, dtSeconds) {
   state.secondaryProcessor.refinedProducts += refinedAmount;
 }
 
+// Score always counts the full shipping income (§3.7); the reservation only
+// diverts part of it from spendable money into savings until auto-purchase.
+function applyIncome(game, income) {
+  const { state, config } = game;
+  state.score += income;
+  const secondary = state.secondaryProcessor;
+  if (!secondary.reserved) {
+    state.money += income;
+    return;
+  }
+  const withheld = income * secondary.reserveRate;
+  secondary.savedAmount += withheld;
+  state.money += income - withheld;
+  if (secondary.savedAmount >= config.secondaryProcessorCost) {
+    state.money += secondary.savedAmount - config.secondaryProcessorCost;
+    secondary.savedAmount = 0;
+    secondary.reserved = false;
+    secondary.reserveRate = null;
+    secondary.purchased = true;
+  }
+}
+
 function spend(game, cost) {
   if (game.state.money < cost) throw new Error(`Insufficient money: need ${cost}, have ${game.state.money}`);
   game.state.money -= cost;
@@ -276,8 +315,9 @@ const exportedGameCore = {
   RUN_DURATION_MS,
   TICK_MS,
   buyNew,
-  buySecondaryProcessor,
   buyUpgrade,
+  cancelSecondaryReservation,
+  reserveSecondaryProcessor,
   calculateNewCost,
   calculateUpgradeCost,
   createGame,

@@ -36,9 +36,28 @@ function stopRun(message = '停止中') {
 function purchase(action, slot) {
   try {
     if (action === 'new') core.buyNew(game, slot);
-    else if (action === 'upgrade') core.buyUpgrade(game, slot);
-    else core.buySecondaryProcessor(game);
+    else core.buyUpgrade(game, slot);
     showMessage('購入しました');
+  } catch (error) {
+    showMessage(error.message);
+  }
+  render();
+}
+
+function reserveSecondary(rate) {
+  try {
+    core.reserveSecondaryProcessor(game, rate);
+    showMessage(`予約しました（天引き${rate * 100}%）`);
+  } catch (error) {
+    showMessage(error.message);
+  }
+  render();
+}
+
+function cancelReservation() {
+  try {
+    core.cancelSecondaryReservation(game);
+    showMessage('予約を解除しました');
   } catch (error) {
     showMessage(error.message);
   }
@@ -61,8 +80,21 @@ function renderInvestments() {
   core.MACHINE_SLOTS.forEach((slot) => {
     investmentsElement.append(investmentButton(`${slot} 強化`, 'upgrade', slot, core.calculateUpgradeCost(game, slot)));
   });
-  if (!game.state.secondaryProcessor.purchased) {
-    investmentsElement.append(investmentButton('二次加工器', 'secondary', null, game.config.secondaryProcessorCost));
+  const secondary = game.state.secondaryProcessor;
+  if (!secondary.purchased && !secondary.reserved) {
+    game.config.secondaryProcessorReserveRates.forEach((rate) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = `二次加工器 予約 天引き${rate * 100}% (${format(game.config.secondaryProcessorCost)})`;
+      button.addEventListener('click', () => reserveSecondary(rate));
+      investmentsElement.append(button);
+    });
+  } else if (secondary.reserved) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = '二次加工器 予約解除';
+    button.addEventListener('click', cancelReservation);
+    investmentsElement.append(button);
   }
 }
 
@@ -75,6 +107,9 @@ function render() {
     ['bufferA', `${format(state.buffers.A)} / ${format(state.capacities.A)}`],
     ['bufferB', `${format(state.buffers.B)} / ${format(state.capacities.B)}`],
     ['精錬品', `${format(state.secondaryProcessor.refinedProducts)} / ${format(state.secondaryProcessor.refinedCapacity)}`],
+    ['二次加工器 積立', state.secondaryProcessor.reserved
+      ? `${format(state.secondaryProcessor.savedAmount)} / ${format(game.config.secondaryProcessorCost)}（天引き${state.secondaryProcessor.reserveRate * 100}%）`
+      : (state.secondaryProcessor.purchased ? '購入済み' : '未予約')],
     ['採取 / 加工 / 出荷', `${state.statuses.collection} / ${state.statuses.processing} / ${state.statuses.shipping}`],
     ['シナジー / 補正', `${state.synergy} / ${state.roundModifier}`],
   ];

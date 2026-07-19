@@ -7,6 +7,9 @@ const core = require('./game-core');
 const BUFFER_CAPACITIES = [10, 20, 40];
 const TRIALS_PER_SCENARIO = 1;
 const PROBE_BUFFER_AMOUNT = 1_000_000;
+// Strategy parameter, not a game rule: reserving from the start starves early
+// compound growth, so saveForSecondary waits before reserving (#16).
+const SECONDARY_RESERVE_DELAY_MS = 180_000;
 
 const STRATEGIES = {
   collectionFirst(game) {
@@ -29,7 +32,11 @@ const STRATEGIES = {
     ]);
   },
   saveForSecondary(game) {
-    if (!game.state.secondaryProcessor.purchased) return tryBuySecondaryProcessor(game);
+    const secondary = game.state.secondaryProcessor;
+    if (!secondary.purchased && !secondary.reserved
+      && game.state.elapsedMs >= SECONDARY_RESERVE_DELAY_MS) {
+      return tryReserveSecondaryProcessor(game);
+    }
     return buyFirstAvailable(game, [
       ['new', 'shipping'], ['new', 'processing'], ['upgrade', 'shipping'],
       ['upgrade', 'processing'], ['new', 'collection'], ['upgrade', 'collection'],
@@ -103,9 +110,9 @@ function tryPurchase(game, kind, slot) {
   }
 }
 
-function tryBuySecondaryProcessor(game) {
+function tryReserveSecondaryProcessor(game) {
   try {
-    core.buySecondaryProcessor(game);
+    core.reserveSecondaryProcessor(game, 0.50);
     return true;
   } catch {
     return false;
