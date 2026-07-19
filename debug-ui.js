@@ -5,6 +5,7 @@ const stateElement = document.querySelector('#state');
 const investmentsElement = document.querySelector('#investments');
 const messageElement = document.querySelector('#message');
 let game = core.createGame();
+window.debugGame = game; // renderer.js draws this game as a pure projection
 let timerId = null;
 
 function format(value) {
@@ -129,6 +130,7 @@ document.querySelector('[data-action="advance"]').addEventListener('click', () =
 document.querySelector('[data-action="reset"]').addEventListener('click', () => {
   stopRun();
   game = core.createGame();
+  window.debugGame = game;
   showMessage('リセットしました');
   render();
 });
