@@ -40,7 +40,7 @@ const DEFAULT_CONFIG = Object.freeze({
   mixedUnitPriceBonus: 0.40,
   secondaryProcessorCost: 250,
   secondaryProcessorRatePerSecond: 1,
-  secondaryProcessorPriceMultiplier: 3,
+  secondaryProcessorPriceMultiplier: 4,
   secondaryProcessorBufferCapacity: 10,
   secondaryProcessorReserveRates: Object.freeze([0.25, 0.50]),
   roundModifier: null,
