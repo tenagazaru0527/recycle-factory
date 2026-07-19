@@ -29,7 +29,8 @@ const STRATEGIES = {
     ]);
   },
   saveForSecondary(game) {
-    if (!game.state.secondaryProcessor.purchased) return tryBuySecondaryProcessor(game);
+    const secondary = game.state.secondaryProcessor;
+    if (!secondary.purchased && !secondary.reserved) return tryReserveSecondaryProcessor(game);
     return buyFirstAvailable(game, [
       ['new', 'shipping'], ['new', 'processing'], ['upgrade', 'shipping'],
       ['upgrade', 'processing'], ['new', 'collection'], ['upgrade', 'collection'],
@@ -103,9 +104,9 @@ function tryPurchase(game, kind, slot) {
   }
 }
 
-function tryBuySecondaryProcessor(game) {
+function tryReserveSecondaryProcessor(game) {
   try {
-    core.buySecondaryProcessor(game);
+    core.reserveSecondaryProcessor(game, 0.50);
     return true;
   } catch {
     return false;
