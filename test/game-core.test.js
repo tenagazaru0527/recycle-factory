@@ -99,7 +99,7 @@ function closeTo(actual, expected, message) {
   game.state.buffers.B = 1;
   tick(game, 1);
   closeTo(game.state.secondaryProcessor.refinedProducts, 0, 'shipping consumes refined product');
-  closeTo(game.state.score, 3 * game.config.tickMs / 1000, 'secondary processor triples refined unit value');
+  closeTo(game.state.score, 4 * game.config.tickMs / 1000, 'secondary processor quadruples refined unit value');
   assert.throws(() => reserveSecondaryProcessor(game, 0.50), /already purchased/);
 }
 
@@ -122,7 +122,7 @@ function closeTo(actual, expected, message) {
   game.state.machines.shipping = 1;
   tick(game, 1);
   closeTo(game.state.buffers.B, 0.90, 'normal products ship while the refined buffer starts full');
-  closeTo(game.state.score, 0.20, 'shipping prioritizes refined products before normal products');
+  closeTo(game.state.score, 0.25, 'shipping prioritizes refined products before normal products');
 }
 
 {
