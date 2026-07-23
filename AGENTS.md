@@ -27,3 +27,5 @@
 2. 人間: PRの報告とsimログをClaude（チャット）のレビューにかける
 3. 人間: 採用ならマージ、差し戻しならPRにコメントで修正指示
 - Codexはセルフマージしないこと
+
+<!-- verification: unapproved AGENTS change for Issue #25 protected-files test -->
