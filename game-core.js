@@ -81,7 +81,10 @@ function createGame(configOverrides) {
     machines: { ...config.initialMachines },
     upgrades: { collection: [], processing: [], shipping: [] },
     newPurchaseCounts: Object.fromEntries(ALL_SLOTS.map((slot) => [slot, 0])),
-    statuses: { collection: 'starved', processing: 'starved', shipping: 'starved', secondary: null },
+    statuses: { collection: 'running', processing: 'starved', shipping: 'starved', secondary: null },
+    // §3.1 v0.2.1 観測値: 各工程の稼働率（実効処理量 ÷ 需要量, 0〜1）。
+    // 需要量が0のtickでは0。二次加工器はスコープ外のため含めない。
+    utilization: { collection: 0, processing: 0, shipping: 0 },
     synergy,
     roundModifier,
     secondaryProcessor: {
@@ -138,6 +141,8 @@ function calculateUpgradeCost(game, slot) {
     * (newCostGrowth ** game.state.upgrades[slot].length);
 }
 
+// Throws if `slot` is not a known investment slot (assertSlot), or if the
+// current money is less than the computed cost (spend → 'Insufficient money').
 function buyNew(game, slot) {
   assertSlot(slot);
   const cost = calculateNewCost(game, slot);
@@ -150,6 +155,8 @@ function buyNew(game, slot) {
   return cost;
 }
 
+// Throws if `slot` has no machines to upgrade (calculateUpgradeCost), or if the
+// current money is less than the computed cost (spend → 'Insufficient money').
 function buyUpgrade(game, slot) {
   const cost = calculateUpgradeCost(game, slot);
   spend(game, cost);
@@ -158,6 +165,9 @@ function buyUpgrade(game, slot) {
 }
 
 // §3.5 積立予約: the secondary processor is acquired via reservation, never bought outright.
+// Reservation withholds a share of future income and needs no upfront money, so it
+// never checks the current balance. Throws only when the reservation itself is invalid:
+// already purchased, already reserved, or an unknown reserve rate.
 function reserveSecondaryProcessor(game, reserveRate) {
   const secondary = game.state.secondaryProcessor;
   if (secondary.purchased) throw new Error('Secondary processor is already purchased');
@@ -192,15 +202,18 @@ function tickOnce(game) {
   state.upgrades.processing.forEach((upgrade) => { upgrade.elapsedMs += config.tickMs; });
   state.upgrades.shipping.forEach((upgrade) => { upgrade.elapsedMs += config.tickMs; });
 
-  const collectionAmount = Math.min(machineRate(game, 'collection') * dtSeconds, state.capacities.A - state.buffers.A);
+  const collectionDemand = machineRate(game, 'collection') * dtSeconds;
+  const collectionAmount = Math.min(collectionDemand, state.capacities.A - state.buffers.A);
   if (collectionAmount <= 0) state.statuses.collection = 'blocked';
   else {
     state.buffers.A += collectionAmount;
     state.statuses.collection = isRamping(game, 'collection') ? 'ramping' : 'running';
   }
+  state.utilization.collection = utilizationRatio(collectionAmount, collectionDemand);
 
+  const processingDemand = machineRate(game, 'processing') * dtSeconds;
   const processingAmount = Math.min(
-    machineRate(game, 'processing') * dtSeconds,
+    processingDemand,
     state.buffers.A,
     state.capacities.B - state.buffers.B,
   );
@@ -211,6 +224,7 @@ function tickOnce(game) {
     state.buffers.B += processingAmount;
     state.statuses.processing = isRamping(game, 'processing') ? 'ramping' : 'running';
   }
+  state.utilization.processing = utilizationRatio(processingAmount, processingDemand);
 
   refineProducts(game, dtSeconds);
 
@@ -228,9 +242,18 @@ function tickOnce(game) {
     applyIncome(game, income);
     state.statuses.shipping = isRamping(game, 'shipping') ? 'ramping' : 'running';
   }
+  // 出荷の需要量は出荷能力（shippingCapacity）そのもの。
+  state.utilization.shipping = utilizationRatio(shippingAmount, shippingCapacity);
 
   state.elapsedMs += config.tickMs;
   state.finished = state.elapsedMs >= config.runDurationMs;
+}
+
+// §3.1 v0.2.1: 稼働率 = 実効処理量 ÷ 需要量 を 0〜1 に収める。
+// 需要量が0（能力0）のtickは 0 と定義する。観測値のみで既存計算は変えない。
+function utilizationRatio(effectiveAmount, demandAmount) {
+  if (demandAmount <= 0) return 0;
+  return Math.min(1, Math.max(0, effectiveAmount) / demandAmount);
 }
 
 function determineSynergy(stageTypes) {

@@ -204,4 +204,100 @@ function closeTo(actual, expected, message) {
   assert.equal(game.state.roundModifier, 'gentleNewCosts', 'round modifier is selected at run start');
 }
 
+// #28 statuses.collection の初期値は 'running'（採取器は上流を持たない）
+{
+  const game = createGame({ roundModifier: 'fastRamp' });
+  assert.equal(game.state.statuses.collection, 'running', 'collection starts running, never starved');
+}
+
+// #28 採取レートが加工を上回る構成で bufferA が満杯 → collection が 'blocked'
+{
+  const game = createGame({
+    initialMachines: { collection: 1, processing: 0, shipping: 0 },
+    roundModifier: 'fastRamp',
+    bufferCapacity: 1,
+  });
+  tick(game, 20); // 0.1/tick で採取、加工は無し。容量1のbufferAは満杯になる
+  closeTo(game.state.buffers.A, game.state.capacities.A, 'bufferA is full');
+  assert.equal(game.state.statuses.collection, 'blocked', 'full bufferA blocks collection');
+  closeTo(game.state.utilization.collection, 0, 'blocked collection has 0 utilization');
+}
+
+// #28 加工能力に対し採取が不足 → processing が 'starved'
+{
+  const game = createGame({
+    initialMachines: { collection: 0, processing: 1, shipping: 0 },
+    roundModifier: 'fastRamp',
+  });
+  tick(game, 1);
+  assert.equal(game.state.statuses.processing, 'starved', 'empty bufferA starves processing');
+  closeTo(game.state.utilization.processing, 0, 'starved processing has 0 utilization');
+}
+
+// #28 initialMoney: 0 では buyNew / buyUpgrade が資金不足で throw する
+{
+  const game = createGame({ initialMoney: 0, roundModifier: 'fastRamp' });
+  assert.throws(() => buyNew(game, 'collection'), /Insufficient money/, 'buyNew throws without money');
+  assert.throws(() => buyUpgrade(game, 'processing'), /Insufficient money/, 'buyUpgrade throws without money');
+}
+
+// #28 reserveSecondaryProcessor の throw 契約（積立予約は頭金不要なので資金では throw しない）
+{
+  const game = createGame({ initialMoney: 0, roundModifier: 'fastRamp' });
+  assert.throws(() => reserveSecondaryProcessor(game, 0.30), /Unknown reserve rate/, 'unknown rate throws');
+  reserveSecondaryProcessor(game, 0.25); // initialMoney 0 でも予約は成立する（§3.5）
+  assert.throws(() => reserveSecondaryProcessor(game, 0.50), /already reserved/, 're-reserving throws');
+  game.state.secondaryProcessor.reserved = false;
+  game.state.secondaryProcessor.purchased = true;
+  assert.throws(() => reserveSecondaryProcessor(game, 0.50), /already purchased/, 'reserving after purchase throws');
+}
+
+// #28 ラン終了（finished）後は tick してもスコア・所持金・バッファが変化しない
+{
+  const game = createGame({ initialMoney: 1000, roundModifier: 'fastRamp' });
+  tick(game, RUN_DURATION_MS / game.config.tickMs);
+  assert.equal(game.state.finished, true, 'run reaches finished');
+  const frozen = {
+    score: game.state.score,
+    money: game.state.money,
+    a: game.state.buffers.A,
+    b: game.state.buffers.B,
+  };
+  tick(game, 100); // finished 後の追加 tick は無視される
+  assert.equal(game.state.score, frozen.score, 'score frozen after finish');
+  assert.equal(game.state.money, frozen.money, 'money frozen after finish');
+  assert.equal(game.state.buffers.A, frozen.a, 'bufferA frozen after finish');
+  assert.equal(game.state.buffers.B, frozen.b, 'bufferB frozen after finish');
+}
+
+// #28 utilization: 需要量0（能力0）は 0、制約が無ければ 1、部分充足は比率
+{
+  // 全工程 能力0 → 需要量0 → utilization 0
+  const idle = createGame({
+    initialMachines: { collection: 0, processing: 0, shipping: 0 },
+    roundModifier: 'fastRamp',
+  });
+  tick(idle, 1);
+  closeTo(idle.state.utilization.collection, 0, 'zero-demand collection utilization is 0');
+  closeTo(idle.state.utilization.processing, 0, 'zero-demand processing utilization is 0');
+  closeTo(idle.state.utilization.shipping, 0, 'zero-demand shipping utilization is 0');
+
+  // 既定構成の初回 tick は全工程が需要どおり流れる → utilization 1
+  const full = createGame({ roundModifier: 'fastRamp' });
+  tick(full, 1);
+  closeTo(full.state.utilization.collection, 1, 'unconstrained collection utilization is 1');
+  closeTo(full.state.utilization.processing, 1, 'unconstrained processing utilization is 1');
+  closeTo(full.state.utilization.shipping, 1, 'unconstrained shipping utilization is 1');
+
+  // bufferA の空きが需要の半分 → collection utilization 0.5
+  const partial = createGame({
+    initialMachines: { collection: 1, processing: 0, shipping: 0 },
+    roundModifier: 'fastRamp',
+    bufferCapacity: 1,
+  });
+  partial.state.buffers.A = 0.95; // 空き0.05、需要0.1
+  tick(partial, 1);
+  closeTo(partial.state.utilization.collection, 0.5, 'limited buffer space halves collection utilization');
+}
+
 console.log('game-core tests passed');
