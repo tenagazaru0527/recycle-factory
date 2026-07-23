@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  pull_request:
+
+# 運用設計書v1.0 §8 の機械ゲート（Issue #25）
+# - test: npm test を実行し、失敗でチェック失敗
+# - protected-files: 保護対象を変更したコミットに docs(approved): 前置を要求
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # 依存が無いため install は省略（package.json に dependencies なし）
+      - run: npm test
+
+  protected-files:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # base..head の全コミットを走査するため全履歴を取得
+          fetch-depth: 0
+      - name: Require docs(approved) prefix for protected-file changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          # 保護対象パス（行頭一致）。package-lock.json は対象外なので
+          # package\.json は行頭完全一致で package-lock.json に誤ヒットしない。
+          protected_regex='^(docs/|AGENTS\.md|CLAUDE\.md|\.github/workflows/|package\.json)'
+          approved_prefix='docs(approved):'
+
+          echo "PR commit range: ${BASE_SHA}..${HEAD_SHA}"
+
+          fail=0
+          # head にあって base に無いコミット（＝このPRのコミット）を走査
+          for sha in $(git rev-list "${BASE_SHA}..${HEAD_SHA}"); do
+            # マージコミット（親2つ以上）はスキップ。
+            # base 取り込みで生じる保護対象差分は当PRの著者変更ではないため。
+            nfields=$(git rev-list --parents -n 1 "$sha" | wc -w)
+            if [ "$nfields" -gt 2 ]; then
+              echo "skip merge commit ${sha}"
+              continue
+            fi
+
+            # このコミットが第1親に対して変更したファイル一覧
+            changed=$(git diff-tree --no-commit-id --name-only -r "$sha")
+            hits=$(printf '%s\n' "$changed" | grep -E "$protected_regex" || true)
+            [ -z "$hits" ] && continue
+
+            subject=$(git log -1 --format=%s "$sha")
+            if [[ "$subject" == "${approved_prefix}"* ]]; then
+              echo "OK    ${sha}: approved (${subject})"
+            else
+              echo "FAIL  ${sha}: protected files changed without '${approved_prefix}' prefix"
+              echo "      subject: ${subject}"
+              printf '%s\n' "$hits" | sed 's/^/      - /'
+              fail=1
+            fi
+          done
+
+          if [ "$fail" -ne 0 ]; then
+            echo "protected-files check failed"
+            exit 1
+          fi
+          echo "protected-files check passed"
