@@ -3,9 +3,10 @@ name: CI
 on:
   pull_request:
 
-# 運用設計書v1.0 §8 の機械ゲート（Issue #25）
-# - test: npm test を実行し、失敗でチェック失敗
-# - protected-files: 保護対象を変更したコミットに docs(approved): 前置を要求
+# CI（運用規約 v3）
+# - test: npm test を実行し、失敗でチェック失敗（ブロッキング・維持）
+# - protected-files: PR が変更する保護対象ファイルをジョブサマリに表示する
+#   非ブロッキング通知（マージはブロックしない。人間がマージ前に確認する）
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -22,9 +23,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # base..head の全コミットを走査するため全履歴を取得
+          # merge-base 以降の差分を取るため全履歴を取得
           fetch-depth: 0
-      - name: Require docs(approved) prefix for protected-file changes
+      - name: Summarize protected-file changes (non-blocking)
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -34,39 +35,21 @@ jobs:
           # 保護対象パス（行頭一致）。package-lock.json は対象外なので
           # package\.json は行頭完全一致で package-lock.json に誤ヒットしない。
           protected_regex='^(docs/|AGENTS\.md|CLAUDE\.md|\.github/workflows/|package\.json)'
-          approved_prefix='docs(approved):'
 
-          echo "PR commit range: ${BASE_SHA}..${HEAD_SHA}"
+          # このPRが merge-base 以降に加えた変更のうち保護対象のもの
+          changed=$(git diff --name-only "${BASE_SHA}...${HEAD_SHA}" | grep -E "$protected_regex" || true)
 
-          fail=0
-          # head にあって base に無いコミット（＝このPRのコミット）を走査
-          for sha in $(git rev-list "${BASE_SHA}..${HEAD_SHA}"); do
-            # マージコミット（親2つ以上）はスキップ。
-            # base 取り込みで生じる保護対象差分は当PRの著者変更ではないため。
-            nfields=$(git rev-list --parents -n 1 "$sha" | wc -w)
-            if [ "$nfields" -gt 2 ]; then
-              echo "skip merge commit ${sha}"
-              continue
-            fi
-
-            # このコミットが第1親に対して変更したファイル一覧
-            changed=$(git diff-tree --no-commit-id --name-only -r "$sha")
-            hits=$(printf '%s\n' "$changed" | grep -E "$protected_regex" || true)
-            [ -z "$hits" ] && continue
-
-            subject=$(git log -1 --format=%s "$sha")
-            if [[ "$subject" == "${approved_prefix}"* ]]; then
-              echo "OK    ${sha}: approved (${subject})"
+          {
+            echo "## Protected-file changes"
+            echo
+            if [ -z "$changed" ]; then
+              echo "このPRは保護対象ファイルを変更していません。"
             else
-              echo "FAIL  ${sha}: protected files changed without '${approved_prefix}' prefix"
-              echo "      subject: ${subject}"
-              printf '%s\n' "$hits" | sed 's/^/      - /'
-              fail=1
+              echo "このPRは次の保護対象ファイルを変更します。マージ前に確認してください:"
+              echo
+              printf '%s\n' "$changed" | sed 's/^/- `/; s/$/`/'
             fi
-          done
+          } >> "$GITHUB_STEP_SUMMARY"
 
-          if [ "$fail" -ne 0 ]; then
-            echo "protected-files check failed"
-            exit 1
-          fi
-          echo "protected-files check passed"
+          # 通知のみ。protected-files はマージをブロックしない（運用規約 v3）。
+          echo "protected-files summary written (non-blocking)"
