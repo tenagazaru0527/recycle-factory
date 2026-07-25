@@ -4,30 +4,33 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Recycle Factory Debug UI</title>
+    <link rel="stylesheet" href="debug-ui.css">
   </head>
   <body>
-    <main>
-      <h1>Recycle Factory Debug UI</h1>
-      <p id="message" role="status"></p>
-      <section>
-        <button type="button" data-action="start">開始</button>
-        <button type="button" data-action="stop">停止</button>
-        <button type="button" data-action="advance">10秒進める</button>
-        <button type="button" data-action="reset">リセット</button>
-      </section>
-      <section>
+    <div class="app">
+      <header class="app-header">
+        <h1>Recycle Factory Debug UI</h1>
+        <div class="controls">
+          <button type="button" data-action="start">開始</button>
+          <button type="button" data-action="stop">停止</button>
+          <button type="button" data-action="advance">10秒進める</button>
+          <button type="button" data-action="reset">リセット</button>
+        </div>
+        <p id="message" role="status"></p>
+      </header>
+      <section class="panel panel-view">
         <h2>工場ビュー</h2>
         <canvas id="factory-canvas" width="780" height="360"></canvas>
       </section>
-      <section>
+      <section class="panel panel-status">
         <h2>状態</h2>
         <dl id="state"></dl>
       </section>
-      <section>
+      <section class="panel panel-invest">
         <h2>投資</h2>
         <div id="investments"></div>
       </section>
-    </main>
+    </div>
     <script src="game-core.js"></script>
     <script src="debug-ui.js"></script>
     <script src="renderer.js"></script>
