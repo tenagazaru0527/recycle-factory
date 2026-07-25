@@ -65,10 +65,28 @@ function cancelReservation() {
   render();
 }
 
-function investmentButton(label, action, slot, cost) {
+/*
+ * 画面に内部名（bufferA / bufferB）を出さず、工程列のどこを指すかで示す。
+ * 表記は記号中心にし、説明文はマウスオーバー時の title だけに置く。
+ * 並び順はゲーム状態に依存しない固定順（強調・並べ替え・色分けはしない）。
+ */
+const SLOT_GLYPHS = {
+  collection: { icon: '▣ 採取', where: '採取工程' },
+  processing: { icon: '▣ 加工', where: '加工工程' },
+  shipping: { icon: '▣ 出荷', where: '出荷工程' },
+  bufferA: { icon: '採取 ▸▸ 加工', where: '採取と加工のあいだの搬送路' },
+  bufferB: { icon: '加工 ▸▸ 出荷', where: '加工と出荷のあいだの搬送路' },
+};
+
+function investmentButton(action, slot, cost) {
+  const glyph = SLOT_GLYPHS[slot];
+  const mark = action === 'new' ? '＋1' : '⬆';
   const button = document.createElement('button');
   button.type = 'button';
-  button.textContent = `${label} (${format(cost)})`;
+  button.textContent = `${glyph.icon} ${mark} (${format(cost)})`;
+  button.title = action === 'new'
+    ? `${glyph.where}を1つ増やす（コスト ${format(cost)}）`
+    : `${glyph.where}の能力を強化する（コスト ${format(cost)}）`;
   button.addEventListener('click', () => purchase(action, slot));
   return button;
 }
@@ -76,24 +94,26 @@ function investmentButton(label, action, slot, cost) {
 function renderInvestments() {
   investmentsElement.replaceChildren();
   core.ALL_SLOTS.forEach((slot) => {
-    investmentsElement.append(investmentButton(`${slot} 新設`, 'new', slot, core.calculateNewCost(game, slot)));
+    investmentsElement.append(investmentButton('new', slot, core.calculateNewCost(game, slot)));
   });
   core.MACHINE_SLOTS.forEach((slot) => {
-    investmentsElement.append(investmentButton(`${slot} 強化`, 'upgrade', slot, core.calculateUpgradeCost(game, slot)));
+    investmentsElement.append(investmentButton('upgrade', slot, core.calculateUpgradeCost(game, slot)));
   });
   const secondary = game.state.secondaryProcessor;
   if (!secondary.purchased && !secondary.reserved) {
     game.config.secondaryProcessorReserveRates.forEach((rate) => {
       const button = document.createElement('button');
       button.type = 'button';
-      button.textContent = `二次加工器 予約 天引き${rate * 100}% (${format(game.config.secondaryProcessorCost)})`;
+      button.textContent = `◆ 二次加工器 予約 ${rate * 100}% (${format(game.config.secondaryProcessorCost)})`;
+      button.title = `出荷収入の${rate * 100}%を積み立てて二次加工器を購入する（必要額 ${format(game.config.secondaryProcessorCost)}）`;
       button.addEventListener('click', () => reserveSecondary(rate));
       investmentsElement.append(button);
     });
   } else if (secondary.reserved) {
     const button = document.createElement('button');
     button.type = 'button';
-    button.textContent = '二次加工器 予約解除';
+    button.textContent = '◆ 二次加工器 予約解除';
+    button.title = '積立を中止し、積み立てた分を所持金へ戻す';
     button.addEventListener('click', cancelReservation);
     investmentsElement.append(button);
   }
@@ -105,8 +125,9 @@ function render() {
     ['経過時間', `${format(state.elapsedMs / 1000)} / ${game.config.runDurationMs / 1000} 秒`],
     ['所持金', format(state.money)],
     ['スコア', format(state.score)],
-    ['bufferA', `${format(state.buffers.A)} / ${format(state.capacities.A)}`],
-    ['bufferB', `${format(state.buffers.B)} / ${format(state.capacities.B)}`],
+    // 内部名（bufferA / bufferB）は出さず、搬送路の位置で示す
+    ['採取 ▸▸ 加工', `${format(state.buffers.A)} / ${format(state.capacities.A)}`],
+    ['加工 ▸▸ 出荷', `${format(state.buffers.B)} / ${format(state.capacities.B)}`],
     ['精錬品', `${format(state.secondaryProcessor.refinedProducts)} / ${format(state.secondaryProcessor.refinedCapacity)}`],
     ['二次加工器 積立', state.secondaryProcessor.reserved
       ? `${format(state.secondaryProcessor.savedAmount)} / ${format(game.config.secondaryProcessorCost)}（天引き${state.secondaryProcessor.reserveRate * 100}%）`
