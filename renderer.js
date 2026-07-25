@@ -48,11 +48,9 @@
   const JAM_FULL_SECONDS = 10; // ここで詰まり表現が最大になる
   const JAM_RELEASE_RATE = 3; // 滞留が減り始めたときの解除の速さ（倍率）
 
-  // 律速段マーカー: どの工程が詰まっているかだけを示す。対処（新設/強化/貯金）は示さない。
-  const BOTTLENECK_MIN_UTILIZATION = 0.6; // 飽和していない工程は律速とみなさない
-  const BOTTLENECK_MARGIN = 0.1; // 2位との差がこれ未満なら「どこか1つ」と言えない
-  const BOTTLENECK_IDLE_UTILIZATION = 0.9; // 他工程がこれ未満＝律速に待たされている
-  const BOTTLENECK_HOLD_MS = 800; // 表示のちらつき防止（最低継続時間）
+  // 稼働メーター: 全装置に同じ計器を置き、utilization を目盛りで示す。
+  // 律速段は「振り切れ（メーター満杯）」として相対的に読ませる。文字ラベルは置かない。
+  const METER_FULL_UTILIZATION = 0.98; // これ以上を振り切れとして形で示す
 
   const MACHINES = {
     collection: { x: 40, y: 115, w: 90, h: 70, label: '採取' },
@@ -78,7 +76,7 @@
   const statusHold = {}; // slot -> { shown, since } — A-3 minimum display duration
   const animPhases = { collection: 0, processing: 0, shipping: 0, secondary: 0 };
   const jamTrackers = {}; // lane -> { smoothed, growingSeconds }
-  const bottleneckHold = { shown: null, since: 0 };
+  let hoveredMachine = null; // マウスオーバー時だけ補足テキストを出す（常設しない）
 
   function displayedStatus(slot, actual, nowMs) {
     const hold = statusHold[slot] || (statusHold[slot] = { shown: actual, since: nowMs });
@@ -111,29 +109,6 @@
     else tracker.growingSeconds = Math.max(0, tracker.growingSeconds - dtSeconds * JAM_RELEASE_RATE);
     const span = JAM_FULL_SECONDS - JAM_ONSET_SECONDS;
     return Math.min(1, Math.max(0, (tracker.growingSeconds - JAM_ONSET_SECONDS) / span));
-  }
-
-  // 律速段: utilization が突出して高い工程を1つだけ指す。ここまでが表示の範囲で、
-  // 対処（新設 / 強化 / 貯金）の提示は行わない（設計方針: 選択はプレイヤーの悩み）。
-  function bottleneckSlot(state, nowMs) {
-    const ranked = ['collection', 'processing', 'shipping']
-      .map((slot) => ({ slot, value: state.utilization[slot] }))
-      .sort((left, right) => right.value - left.value);
-    const [top, second] = ranked;
-    const othersWaiting = ranked.slice(1).some(({ slot, value }) => (
-      value < BOTTLENECK_IDLE_UTILIZATION || isHalted(state.statuses[slot])
-    ));
-    const candidate = (
-      top.value >= BOTTLENECK_MIN_UTILIZATION
-      && top.value - second.value >= BOTTLENECK_MARGIN
-      && othersWaiting
-    ) ? top.slot : null;
-
-    if (candidate !== bottleneckHold.shown && nowMs - bottleneckHold.since >= BOTTLENECK_HOLD_MS) {
-      bottleneckHold.shown = candidate;
-      bottleneckHold.since = nowMs;
-    }
-    return bottleneckHold.shown;
   }
 
   function darken(hex, factor) {
@@ -462,41 +437,122 @@
     ctx.fillRect(cx + 2, cy - 8, 5, 16);
   }
 
-  // 律速段マーカー: 「ここが詰まっている」だけを示す静的な表現。
-  // 対処方法（新設 / 強化 / 貯金）の提示・誘導は行わない。
-  function drawBottleneckMarker(machine) {
+  // starved: 入力側に「空の受け皿」。粒がゼロであること自体を語彙にする。
+  function drawEmptyTray(machine, timeSeconds) {
+    const x = machine.x - 20;
+    const y = machine.y + machine.h / 2;
+    const pulse = 0.55 + 0.45 * Math.sin(timeSeconds * 4);
+    ctx.save();
+    ctx.globalAlpha = 0.5 + 0.4 * pulse;
+    ctx.strokeStyle = PALETTE.lampStarved;
+    ctx.lineWidth = 2;
+    ctx.beginPath(); // 受け皿（下向きの弧）。中身は描かない = 空
+    ctx.moveTo(x - 9, y - 5);
+    ctx.lineTo(x - 7, y + 5);
+    ctx.lineTo(x + 7, y + 5);
+    ctx.lineTo(x + 9, y - 5);
+    ctx.stroke();
+    ctx.setLineDash([2, 3]); // 空であることを破線の水面で示す
+    ctx.beginPath();
+    ctx.moveTo(x - 7, y + 2);
+    ctx.lineTo(x + 7, y + 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // blocked: 出力側に「溢れる粒」。受け皿から粒がこぼれている形にする。
+  function drawOverflowHeap(machine, kind, stageType, timeSeconds) {
+    const x = machine.x + machine.w + 20;
+    const y = machine.y + machine.h / 2;
     ctx.save();
     ctx.strokeStyle = PALETTE.lampBlocked;
     ctx.lineWidth = 2;
-    ctx.setLineDash([5, 4]);
-    ctx.beginPath();
-    ctx.roundRect(machine.x - 5, machine.y - 5, machine.w + 10, machine.h + 10, 10);
+    ctx.beginPath(); // 受け皿は starved と同じ形。違いは中身の粒の有無
+    ctx.moveTo(x - 9, y - 5);
+    ctx.lineTo(x - 7, y + 5);
+    ctx.lineTo(x + 7, y + 5);
+    ctx.lineTo(x + 9, y - 5);
     ctx.stroke();
     ctx.restore();
-
-    const cx = machine.x + machine.w / 2;
-    const tipY = machine.y - 10;
-    ctx.fillStyle = PALETTE.lampBlocked;
-    ctx.beginPath();
-    ctx.moveTo(cx, tipY);
-    ctx.lineTo(cx - 7, tipY - 10);
-    ctx.lineTo(cx + 7, tipY - 10);
-    ctx.closePath();
-    ctx.fill();
-    ctx.font = 'bold 10px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText('律速', cx, tipY - 14);
+    const spill = Math.sin(timeSeconds * 4) * 1.5;
+    drawParticle(kind, stageType, x - 4, y + 1, 4);
+    drawParticle(kind, stageType, x + 4, y + 1, 4);
+    drawParticle(kind, stageType, x, y - 6 + spill, 4); // 縁からこぼれる1粒
   }
 
-  function applyStatusDecoration(machine, status, timeSeconds) {
+  // 全装置共通の稼働メーター。utilization を目盛りで示し、律速段は振り切れとして
+  // 相対的に読ませる（文字ラベルは置かない）。
+  function drawUtilizationMeter(machine, utilization) {
+    const width = machine.w - 16;
+    const x = machine.x + 8;
+    const y = machine.y + machine.h + 22; // 装置ラベルの下に置く
+    const ratio = Math.min(1, Math.max(0, utilization));
+    ctx.strokeStyle = PALETTE.laneEdge;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x, y, width, 6);
+    ctx.fillStyle = ratio >= METER_FULL_UTILIZATION ? PALETTE.lampBlocked : PALETTE.lampStarved;
+    ctx.fillRect(x + 1, y + 1, Math.max(0, (width - 2) * ratio), 4);
+    ctx.fillStyle = PALETTE.laneEdge;
+    ctx.fillRect(x + width / 2, y - 2, 1, 2); // 50%の目盛り
+    if (ratio >= METER_FULL_UTILIZATION) {
+      // 振り切れ: 針が右端を超えた形（色に依存しない差分）
+      ctx.fillStyle = PALETTE.lampBlocked;
+      ctx.beginPath();
+      ctx.moveTo(x + width + 2, y);
+      ctx.lineTo(x + width + 9, y + 3);
+      ctx.lineTo(x + width + 2, y + 6);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+
+  function applyStatusDecoration(machine, status, kind, stageType, timeSeconds) {
     drawStatusLamp(machine, status);
     if (status === 'starved') {
-      drawSideMarker(machine, 'input', PALETTE.lampStarved, timeSeconds);
+      drawEmptyTray(machine, timeSeconds);
       drawHaltBadge(machine, status);
     } else if (status === 'blocked') {
-      drawSideMarker(machine, 'output', PALETTE.lampBlocked, timeSeconds);
+      drawOverflowHeap(machine, kind, stageType, timeSeconds);
       drawHaltBadge(machine, status);
     } else if (status === 'ramping') drawRampGauge(machine, timeSeconds);
+  }
+
+  // --- hover tooltip (補足テキストはマウスオーバー時のみ。画面に常設しない) ---
+
+  const STATUS_TEXT = {
+    running: '稼働中',
+    ramping: '立ち上げ中',
+    starved: '入力待ち（材料が届いていない）',
+    blocked: '出力詰まり（次の工程が受け取れない）',
+  };
+
+  canvas.addEventListener('mousemove', (event) => {
+    const box = canvas.getBoundingClientRect();
+    const x = (event.clientX - box.left) * (canvas.width / box.width);
+    const y = (event.clientY - box.top) * (canvas.height / box.height);
+    hoveredMachine = Object.keys(MACHINES).find((slot) => {
+      const machine = MACHINES[slot];
+      return x >= machine.x && x <= machine.x + machine.w
+        && y >= machine.y && y <= machine.y + machine.h + 26; // 稼働メーターまで含める
+    }) || null;
+  });
+  canvas.addEventListener('mouseleave', () => { hoveredMachine = null; });
+
+  function updateHoverTooltip(state) {
+    if (!hoveredMachine) {
+      if (canvas.title) canvas.title = '';
+      return;
+    }
+    const label = MACHINES[hoveredMachine].label;
+    const status = state.statuses[hoveredMachine];
+    if (!status) {
+      canvas.title = `${label}: 未購入`;
+      return;
+    }
+    const utilization = state.utilization[hoveredMachine];
+    canvas.title = utilization === undefined
+      ? `${label}: ${STATUS_TEXT[status] ?? status}`
+      : `${label}: 稼働率 ${Math.round(utilization * 100)}% / ${STATUS_TEXT[status] ?? status}`;
   }
 
   // --- frame loop ---
@@ -559,23 +615,30 @@
 
     drawCollection(MACHINES.collection, config.stageTypes.collection, shown.collection, animPhases.collection);
     drawCountDots(MACHINES.collection, state.machines.collection);
-    applyStatusDecoration(MACHINES.collection, shown.collection, timeSeconds);
+    applyStatusDecoration(MACHINES.collection, shown.collection, 'raw', config.stageTypes.collection, timeSeconds);
+    drawUtilizationMeter(MACHINES.collection, state.utilization.collection);
 
     drawProcessing(MACHINES.processing, config.stageTypes.processing, shown.processing, animPhases.processing);
     drawCountDots(MACHINES.processing, state.machines.processing);
-    applyStatusDecoration(MACHINES.processing, shown.processing, timeSeconds);
+    applyStatusDecoration(MACHINES.processing, shown.processing, 'product', config.stageTypes.processing, timeSeconds);
+    drawUtilizationMeter(MACHINES.processing, state.utilization.processing);
 
     drawShipping(MACHINES.shipping, shown.shipping, animPhases.shipping);
     drawCountDots(MACHINES.shipping, state.machines.shipping);
-    applyStatusDecoration(MACHINES.shipping, shown.shipping, timeSeconds);
+    applyStatusDecoration(MACHINES.shipping, shown.shipping, 'product', config.stageTypes.processing, timeSeconds);
+    drawUtilizationMeter(MACHINES.shipping, state.utilization.shipping);
 
     if (state.secondaryProcessor.purchased) {
       drawSecondary(MACHINES.secondary, shown.secondary, animPhases.secondary);
-      if (shown.secondary) applyStatusDecoration(MACHINES.secondary, shown.secondary, timeSeconds);
+      if (shown.secondary) {
+        applyStatusDecoration(MACHINES.secondary, shown.secondary, 'refined', null, timeSeconds);
+      }
+      // 二次加工器の utilization は game-core が未公開のため、公開されている
+      // status をそのまま写す（稼働=満、停止=空）。推測は行わない。
+      drawUtilizationMeter(MACHINES.secondary, shown.secondary === 'running' ? 1 : 0);
     }
 
-    const bottleneck = bottleneckSlot(state, nowMs);
-    if (bottleneck) drawBottleneckMarker(MACHINES[bottleneck]);
+    updateHoverTooltip(state);
   }
 
   requestAnimationFrame(frame);
