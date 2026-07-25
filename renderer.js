@@ -34,6 +34,26 @@
   const MIN_STATUS_DISPLAY_MS = 300; // A-3: 表示切替の最低継続時間
   const BASE_PARTICLE_SPEED = 30; // px/s
 
+  // A-3 稼働の連続表現: utilization(0〜1) を可動部の速度へ写像する。
+  // 動いている装置は最低でも MIN_MOTION_SCALE の速さで動き、完全停止
+  // (starved/blocked) だけが速度0 + 静的な停止バッジという離散表現になる。
+  const MIN_MOTION_SCALE = 0.22;
+
+  // A-2 詰まり判定（容量非依存）: 滞留が継続して増え続けた「秒数」で測る。
+  // 充填率の固定閾値だと、投資で容量が伸びた局面（容量114/164など）で
+  // 実際に詰まっていても発動しないため、容量に依存しない量を使う。
+  const JAM_SMOOTHING_PER_SECOND = 2; // 滞留量EMAの追随速度
+  const JAM_GROWTH_EPSILON = 0.05; // 個/秒。これ以下の増加は横ばい扱い
+  const JAM_ONSET_SECONDS = 4; // 継続増加がこの秒数を超えたら詰まり表現を出す
+  const JAM_FULL_SECONDS = 10; // ここで詰まり表現が最大になる
+  const JAM_RELEASE_RATE = 3; // 滞留が減り始めたときの解除の速さ（倍率）
+
+  // 律速段マーカー: どの工程が詰まっているかだけを示す。対処（新設/強化/貯金）は示さない。
+  const BOTTLENECK_MIN_UTILIZATION = 0.6; // 飽和していない工程は律速とみなさない
+  const BOTTLENECK_MARGIN = 0.1; // 2位との差がこれ未満なら「どこか1つ」と言えない
+  const BOTTLENECK_IDLE_UTILIZATION = 0.9; // 他工程がこれ未満＝律速に待たされている
+  const BOTTLENECK_HOLD_MS = 800; // 表示のちらつき防止（最低継続時間）
+
   const MACHINES = {
     collection: { x: 40, y: 115, w: 90, h: 70, label: '採取' },
     processing: { x: 330, y: 115, w: 90, h: 70, label: '加工' },
@@ -57,6 +77,8 @@
 
   const statusHold = {}; // slot -> { shown, since } — A-3 minimum display duration
   const animPhases = { collection: 0, processing: 0, shipping: 0, secondary: 0 };
+  const jamTrackers = {}; // lane -> { smoothed, growingSeconds }
+  const bottleneckHold = { shown: null, since: 0 };
 
   function displayedStatus(slot, actual, nowMs) {
     const hold = statusHold[slot] || (statusHold[slot] = { shown: actual, since: nowMs });
@@ -65,6 +87,53 @@
       hold.since = nowMs;
     }
     return hold.shown;
+  }
+
+  function isHalted(status) {
+    return status === 'starved' || status === 'blocked';
+  }
+
+  // A-3: 稼働率を速度倍率へ。停止だけは 0（連続量と混ざらない離散値）。
+  function motionScale(status, utilization) {
+    if (isHalted(status) || status === null) return 0;
+    const ratio = Math.min(1, Math.max(0, utilization));
+    return MIN_MOTION_SCALE + (1 - MIN_MOTION_SCALE) * ratio;
+  }
+
+  // A-2: 滞留量の継続的な増加から詰まり度合い(0〜1)を得る。容量には依存しない。
+  function updateJamLevel(name, level, dtSeconds) {
+    const tracker = jamTrackers[name] || (jamTrackers[name] = { smoothed: level, growingSeconds: 0 });
+    const previous = tracker.smoothed;
+    const follow = Math.min(1, dtSeconds * JAM_SMOOTHING_PER_SECOND);
+    tracker.smoothed = previous + (level - previous) * follow;
+    const growthPerSecond = dtSeconds > 0 ? (tracker.smoothed - previous) / dtSeconds : 0;
+    if (growthPerSecond > JAM_GROWTH_EPSILON) tracker.growingSeconds += dtSeconds;
+    else tracker.growingSeconds = Math.max(0, tracker.growingSeconds - dtSeconds * JAM_RELEASE_RATE);
+    const span = JAM_FULL_SECONDS - JAM_ONSET_SECONDS;
+    return Math.min(1, Math.max(0, (tracker.growingSeconds - JAM_ONSET_SECONDS) / span));
+  }
+
+  // 律速段: utilization が突出して高い工程を1つだけ指す。ここまでが表示の範囲で、
+  // 対処（新設 / 強化 / 貯金）の提示は行わない（設計方針: 選択はプレイヤーの悩み）。
+  function bottleneckSlot(state, nowMs) {
+    const ranked = ['collection', 'processing', 'shipping']
+      .map((slot) => ({ slot, value: state.utilization[slot] }))
+      .sort((left, right) => right.value - left.value);
+    const [top, second] = ranked;
+    const othersWaiting = ranked.slice(1).some(({ slot, value }) => (
+      value < BOTTLENECK_IDLE_UTILIZATION || isHalted(state.statuses[slot])
+    ));
+    const candidate = (
+      top.value >= BOTTLENECK_MIN_UTILIZATION
+      && top.value - second.value >= BOTTLENECK_MARGIN
+      && othersWaiting
+    ) ? top.slot : null;
+
+    if (candidate !== bottleneckHold.shown && nowMs - bottleneckHold.since >= BOTTLENECK_HOLD_MS) {
+      bottleneckHold.shown = candidate;
+      bottleneckHold.since = nowMs;
+    }
+    return bottleneckHold.shown;
   }
 
   function darken(hex, factor) {
@@ -158,9 +227,15 @@
     return { fromX, fromY, unitX: (toX - fromX) / length, unitY: (toY - fromY) / length, length };
   }
 
-  function drawLane(name, lane, fillRatio, kind, stageType, dtSeconds, timeSeconds, machineCount) {
+  function drawLane(name, lane, flow, kind, stageType, dtSeconds, timeSeconds) {
     const geometry = laneGeometry(lane);
     const pool = pools[name];
+    const { fillRatio, upstreamStatus, upstreamMotion } = flow;
+    const upstreamHalted = isHalted(upstreamStatus);
+    // 満杯で張り付いている（上流が押し戻されている）状態は、滞留の増加が
+    // 止まって見えても詰まりそのもの。増加ベースの判定と max を取る。
+    const saturated = fillRatio >= 0.999 || upstreamStatus === 'blocked';
+    const jamLevel = Math.max(flow.jamLevel, saturated ? 1 : 0);
 
     // Lane bed
     ctx.strokeStyle = PALETTE.lane;
@@ -171,19 +246,20 @@
     ctx.lineTo(geometry.fromX + geometry.unitX * geometry.length, geometry.fromY + geometry.unitY * geometry.length);
     ctx.stroke();
 
-    // 90〜100%: 搬送路の圧縮/点滅表現 (A-2)
-    if (fillRatio >= 0.9) {
+    // 詰まり中: 搬送路の圧縮/点滅表現 (A-2)。発動条件は滞留の継続増加であり、
+    // 容量が成長しても機能する（充填率の固定閾値には依存しない）。
+    if (jamLevel > 0) {
       const pulse = 0.45 + 0.4 * Math.sin(timeSeconds * 10);
-      ctx.strokeStyle = `rgba(224, 82, 82, ${pulse.toFixed(3)})`;
-      ctx.lineWidth = 18;
+      ctx.strokeStyle = `rgba(224, 82, 82, ${(pulse * jamLevel).toFixed(3)})`;
+      ctx.lineWidth = 14 + 4 * jamLevel;
       ctx.beginPath();
       ctx.moveTo(geometry.fromX, geometry.fromY);
       ctx.lineTo(geometry.fromX + geometry.unitX * geometry.length, geometry.fromY + geometry.unitY * geometry.length);
       ctx.stroke();
     }
 
-    // 100%: 上流装置の停止が明確に見える — static red stop bar at the lane entry.
-    if (fillRatio >= 0.999) {
+    // 上流が停止している（満杯 or blocked）: 停止が明確に見える静的な赤バー。
+    if (saturated) {
       ctx.fillStyle = PALETTE.lampBlocked;
       ctx.save();
       ctx.translate(geometry.fromX, geometry.fromY);
@@ -192,17 +268,21 @@
       ctx.restore();
     }
 
-    // Particle count / spacing from fill ratio (A-2: 0-50% count grows, 50-90% spacing narrows).
-    const count = fillRatio <= 0.001 ? 0
+    // Particle count / spacing (A-2: 0-50% count grows, 50%〜 spacing narrows).
+    // 詰まり中は容量に対する充填率が低くても列が伸びて詰まって見えるようにする。
+    const fillCount = fillRatio <= 0.001 ? 0
       : fillRatio < 0.5 ? Math.max(1, Math.round(MAX_PARTICLES_PER_LANE * (fillRatio / 0.5)))
         : MAX_PARTICLES_PER_LANE;
-    const compression = fillRatio < 0.5 ? 0 : Math.min(1, (fillRatio - 0.5) / 0.4);
+    const jamCount = jamLevel > 0 ? Math.round(MAX_PARTICLES_PER_LANE * (0.5 + 0.5 * jamLevel)) : 0;
+    const count = fillRatio <= 0.001 ? 0 : Math.max(fillCount, jamCount);
+    const fillCompression = fillRatio < 0.5 ? 0 : Math.min(1, (fillRatio - 0.5) / 0.4);
+    const compression = Math.max(fillCompression, jamLevel);
     const packedLength = geometry.length * (1 - 0.45 * compression);
 
-    // Flow speed: visual mapping from upstream machine count; jammed lanes slow, full lanes stall.
-    const speedScale = 1 + 0.25 * Math.min(Math.max(machineCount - 1, 0), 4);
-    const jamScale = fillRatio >= 0.999 ? 0 : fillRatio >= 0.9 ? 0.35 : 1;
-    pool.scroll += dtSeconds * BASE_PARTICLE_SPEED * speedScale * jamScale;
+    // 流量は上流装置の utilization を連続量として写像する。詰まるほど遅くなり、
+    // 上流が完全停止していれば止まる。
+    const jamScale = upstreamHalted ? 0 : 1 - 0.65 * jamLevel;
+    pool.scroll += dtSeconds * BASE_PARTICLE_SPEED * upstreamMotion * jamScale;
 
     if (count === 0) return;
     const spacing = packedLength / count;
@@ -365,11 +445,58 @@
     ctx.stroke();
   }
 
+  // 完全停止の離散表現: 可動部を止めるだけでは「低稼働でゆっくり動いている」と
+  // 見分けがつかないため、静止画でも区別できる停止バッジを重ねる（点滅に依存しない）。
+  function drawHaltBadge(machine, status) {
+    const cx = machine.x + machine.w / 2;
+    const cy = machine.y + machine.h / 2;
+    ctx.save();
+    ctx.globalAlpha = 0.55;
+    ctx.fillStyle = '#15181c';
+    ctx.beginPath();
+    ctx.arc(cx, cy, 15, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    ctx.fillStyle = status === 'blocked' ? PALETTE.lampBlocked : PALETTE.lampStarved;
+    ctx.fillRect(cx - 7, cy - 8, 5, 16);
+    ctx.fillRect(cx + 2, cy - 8, 5, 16);
+  }
+
+  // 律速段マーカー: 「ここが詰まっている」だけを示す静的な表現。
+  // 対処方法（新設 / 強化 / 貯金）の提示・誘導は行わない。
+  function drawBottleneckMarker(machine) {
+    ctx.save();
+    ctx.strokeStyle = PALETTE.lampBlocked;
+    ctx.lineWidth = 2;
+    ctx.setLineDash([5, 4]);
+    ctx.beginPath();
+    ctx.roundRect(machine.x - 5, machine.y - 5, machine.w + 10, machine.h + 10, 10);
+    ctx.stroke();
+    ctx.restore();
+
+    const cx = machine.x + machine.w / 2;
+    const tipY = machine.y - 10;
+    ctx.fillStyle = PALETTE.lampBlocked;
+    ctx.beginPath();
+    ctx.moveTo(cx, tipY);
+    ctx.lineTo(cx - 7, tipY - 10);
+    ctx.lineTo(cx + 7, tipY - 10);
+    ctx.closePath();
+    ctx.fill();
+    ctx.font = 'bold 10px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('律速', cx, tipY - 14);
+  }
+
   function applyStatusDecoration(machine, status, timeSeconds) {
     drawStatusLamp(machine, status);
-    if (status === 'starved') drawSideMarker(machine, 'input', PALETTE.lampStarved, timeSeconds);
-    else if (status === 'blocked') drawSideMarker(machine, 'output', PALETTE.lampBlocked, timeSeconds);
-    else if (status === 'ramping') drawRampGauge(machine, timeSeconds);
+    if (status === 'starved') {
+      drawSideMarker(machine, 'input', PALETTE.lampStarved, timeSeconds);
+      drawHaltBadge(machine, status);
+    } else if (status === 'blocked') {
+      drawSideMarker(machine, 'output', PALETTE.lampBlocked, timeSeconds);
+      drawHaltBadge(machine, status);
+    } else if (status === 'ramping') drawRampGauge(machine, timeSeconds);
   }
 
   // --- frame loop ---
@@ -397,19 +524,37 @@
       secondary: displayedStatus('secondary', state.statuses.secondary ?? null, nowMs),
     };
 
-    // Moving parts animate only while running / ramping (A-3).
+    // A-3: 可動部の速さは utilization の連続写像。停止時のみ速度0（離散）。
+    // secondary は utilization が未公開のため、running を等速として扱う。
+    const motion = {
+      collection: motionScale(shown.collection, state.utilization.collection),
+      processing: motionScale(shown.processing, state.utilization.processing),
+      shipping: motionScale(shown.shipping, state.utilization.shipping),
+      secondary: motionScale(shown.secondary, 1),
+    };
     ['collection', 'processing', 'shipping', 'secondary'].forEach((slot) => {
-      if (shown[slot] === 'running' || shown[slot] === 'ramping') animPhases[slot] += dtSeconds * 3;
+      animPhases[slot] += dtSeconds * 3 * motion[slot];
     });
 
-    drawLane('bufferA', LANES.bufferA, state.buffers.A / state.capacities.A, 'raw',
-      config.stageTypes.collection, dtSeconds, timeSeconds, state.machines.collection);
-    drawLane('bufferB', LANES.bufferB, state.buffers.B / state.capacities.B, 'product',
-      config.stageTypes.processing, dtSeconds, timeSeconds, state.machines.processing);
+    drawLane('bufferA', LANES.bufferA, {
+      fillRatio: state.buffers.A / state.capacities.A,
+      jamLevel: updateJamLevel('bufferA', state.buffers.A, dtSeconds),
+      upstreamStatus: shown.collection,
+      upstreamMotion: motion.collection,
+    }, 'raw', config.stageTypes.collection, dtSeconds, timeSeconds);
+    drawLane('bufferB', LANES.bufferB, {
+      fillRatio: state.buffers.B / state.capacities.B,
+      jamLevel: updateJamLevel('bufferB', state.buffers.B, dtSeconds),
+      upstreamStatus: shown.processing,
+      upstreamMotion: motion.processing,
+    }, 'product', config.stageTypes.processing, dtSeconds, timeSeconds);
     if (state.secondaryProcessor.purchased) {
-      drawLane('refined', LANES.refined,
-        state.secondaryProcessor.refinedProducts / state.secondaryProcessor.refinedCapacity,
-        'refined', null, dtSeconds, timeSeconds, 1);
+      drawLane('refined', LANES.refined, {
+        fillRatio: state.secondaryProcessor.refinedProducts / state.secondaryProcessor.refinedCapacity,
+        jamLevel: updateJamLevel('refined', state.secondaryProcessor.refinedProducts, dtSeconds),
+        upstreamStatus: shown.secondary,
+        upstreamMotion: motion.secondary,
+      }, 'refined', null, dtSeconds, timeSeconds);
     }
 
     drawCollection(MACHINES.collection, config.stageTypes.collection, shown.collection, animPhases.collection);
@@ -428,6 +573,9 @@
       drawSecondary(MACHINES.secondary, shown.secondary, animPhases.secondary);
       if (shown.secondary) applyStatusDecoration(MACHINES.secondary, shown.secondary, timeSeconds);
     }
+
+    const bottleneck = bottleneckSlot(state, nowMs);
+    if (bottleneck) drawBottleneckMarker(MACHINES[bottleneck]);
   }
 
   requestAnimationFrame(frame);
