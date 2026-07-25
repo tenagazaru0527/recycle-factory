@@ -85,6 +85,10 @@ function createGame(configOverrides) {
     // §3.1 v0.2.1 観測値: 各工程の稼働率（実効処理量 ÷ 需要量, 0〜1）。
     // 需要量が0のtickでは0。二次加工器はスコープ外のため含めない。
     utilization: { collection: 0, processing: 0, shipping: 0 },
+    // 観測値: 直近tickの実効処理量（個/秒）。tick内で既に算出している量を
+    // dtSeconds で割って公開するだけで、計算ロジックには関与しない。
+    // 在庫（buffers）とは独立した量で、在庫0でも流量は正になりうる。
+    throughput: { collection: 0, processing: 0, shipping: 0, secondary: 0 },
     synergy,
     roundModifier,
     secondaryProcessor: {
@@ -210,6 +214,7 @@ function tickOnce(game) {
     state.statuses.collection = isRamping(game, 'collection') ? 'ramping' : 'running';
   }
   state.utilization.collection = utilizationRatio(collectionAmount, collectionDemand);
+  state.throughput.collection = collectionAmount / dtSeconds;
 
   const processingDemand = machineRate(game, 'processing') * dtSeconds;
   const processingAmount = Math.min(
@@ -225,6 +230,7 @@ function tickOnce(game) {
     state.statuses.processing = isRamping(game, 'processing') ? 'ramping' : 'running';
   }
   state.utilization.processing = utilizationRatio(processingAmount, processingDemand);
+  state.throughput.processing = processingAmount / dtSeconds;
 
   refineProducts(game, dtSeconds);
 
@@ -244,6 +250,7 @@ function tickOnce(game) {
   }
   // 出荷の需要量は出荷能力（shippingCapacity）そのもの。
   state.utilization.shipping = utilizationRatio(shippingAmount, shippingCapacity);
+  state.throughput.shipping = shippingAmount / dtSeconds;
 
   state.elapsedMs += config.tickMs;
   state.finished = state.elapsedMs >= config.runDurationMs;
@@ -290,11 +297,16 @@ function refineProducts(game, dtSeconds) {
   const secondary = state.secondaryProcessor;
   if (!secondary.purchased) {
     state.statuses.secondary = null;
+    state.throughput.secondary = 0;
     return;
   }
-  if (state.buffers.B <= 0) state.statuses.secondary = 'starved';
-  else if (secondary.refinedCapacity - secondary.refinedProducts <= 0) state.statuses.secondary = 'blocked';
-  else {
+  if (state.buffers.B <= 0) {
+    state.statuses.secondary = 'starved';
+    state.throughput.secondary = 0;
+  } else if (secondary.refinedCapacity - secondary.refinedProducts <= 0) {
+    state.statuses.secondary = 'blocked';
+    state.throughput.secondary = 0;
+  } else {
     const refinedAmount = Math.min(
       config.secondaryProcessorRatePerSecond * dtSeconds,
       state.buffers.B,
@@ -303,6 +315,7 @@ function refineProducts(game, dtSeconds) {
     state.buffers.B -= refinedAmount;
     secondary.refinedProducts += refinedAmount;
     state.statuses.secondary = 'running';
+    state.throughput.secondary = refinedAmount / dtSeconds;
   }
 }
 

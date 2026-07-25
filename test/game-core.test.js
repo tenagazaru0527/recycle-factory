@@ -300,4 +300,53 @@ function closeTo(actual, expected, message) {
   closeTo(partial.state.utilization.collection, 0.5, 'limited buffer space halves collection utilization');
 }
 
+// #43 throughput: 直近tickの実効処理量（個/秒）。在庫とは独立した観測値。
+{
+  // 既定構成: 採取1台=1個/秒 が採取・加工・出荷を素通りする（在庫は0のまま）
+  const flow = createGame({ roundModifier: 'fastRamp' });
+  tick(flow, 1);
+  closeTo(flow.state.throughput.collection, 1, 'collection throughput is 1 per second');
+  closeTo(flow.state.throughput.processing, 1, 'processing throughput is 1 per second');
+  closeTo(flow.state.throughput.shipping, 1, 'shipping throughput is 1 per second');
+  closeTo(flow.state.buffers.A, 0, 'healthy line keeps bufferA empty while flowing');
+  closeTo(flow.state.buffers.B, 0, 'healthy line keeps bufferB empty while flowing');
+  assert.equal(flow.state.throughput.secondary, 0, 'unpurchased secondary has 0 throughput');
+
+  // 台数を増やすと流量が増える（在庫0のまま）
+  buyNew(flow, 'collection');
+  buyNew(flow, 'processing');
+  buyNew(flow, 'shipping');
+  tick(flow, 100); // ramp 完了まで進める
+  closeTo(flow.state.throughput.collection, 2, 'added machine doubles collection throughput');
+  closeTo(flow.state.throughput.shipping, 2, 'added machine doubles shipping throughput');
+
+  // 能力0 → 流量0。在庫があっても流量は0（2軸が独立していること）
+  const stalled = createGame({
+    initialMachines: { collection: 0, processing: 0, shipping: 0 },
+    roundModifier: 'fastRamp',
+  });
+  stalled.state.buffers.A = 5;
+  stalled.state.buffers.B = 5;
+  tick(stalled, 1);
+  assert.equal(stalled.state.throughput.collection, 0, 'no machine means no collection throughput');
+  assert.equal(stalled.state.throughput.processing, 0, 'no machine means no processing throughput');
+  assert.equal(stalled.state.throughput.shipping, 0, 'no machine means no shipping throughput');
+  assert.ok(stalled.state.buffers.A > 0, 'inventory can remain while throughput is 0');
+
+  // 二次加工器: 稼働中は精錬量が流量として出る
+  const refining = createGame({ roundModifier: 'fastRamp' });
+  refining.state.secondaryProcessor.purchased = true;
+  refining.state.buffers.B = 5;
+  tick(refining, 1);
+  closeTo(refining.state.throughput.secondary, 1, 'running secondary reports its refine rate');
+
+  // 二次加工器: 入力切れなら流量0
+  const starvedSecondary = createGame({ roundModifier: 'fastRamp' });
+  starvedSecondary.state.secondaryProcessor.purchased = true;
+  starvedSecondary.state.buffers.B = 0;
+  starvedSecondary.state.machines.processing = 0;
+  tick(starvedSecondary, 1);
+  assert.equal(starvedSecondary.state.throughput.secondary, 0, 'starved secondary reports 0 throughput');
+}
+
 console.log('game-core tests passed');

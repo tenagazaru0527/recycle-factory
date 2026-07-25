@@ -31,6 +31,10 @@
   };
 
   const MAX_PARTICLES_PER_LANE = 12; // A-1: 最大表示粒数（1粒=N個の代表表示）
+  // A-1: 粒の「数・流れる速さ」は流量（個/秒）由来、「密集・滞留・停止」は在庫由来。
+  // 2軸は独立で、在庫0でも流量があれば粒は流れ、流量0でも在庫があれば粒は止まる。
+  const FLOW_REFERENCE_PER_SECOND = 6; // 表示上の満スケール（粒数・速度が最大になる流量）
+  const MIN_FLOW_SPEED_SCALE = 0.3; // 流量がわずかでも動いていると分かる下限速度
   const MIN_STATUS_DISPLAY_MS = 300; // A-3: 表示切替の最低継続時間
   const BASE_PARTICLE_SPEED = 30; // px/s
 
@@ -205,7 +209,8 @@
   function drawLane(name, lane, flow, kind, stageType, dtSeconds, timeSeconds) {
     const geometry = laneGeometry(lane);
     const pool = pools[name];
-    const { fillRatio, upstreamStatus, upstreamMotion } = flow;
+    const { fillRatio, upstreamStatus, flowPerSecond } = flow;
+    const flowRatio = Math.min(1, Math.max(0, flowPerSecond) / FLOW_REFERENCE_PER_SECOND);
     const upstreamHalted = isHalted(upstreamStatus);
     // 満杯で張り付いている（上流が押し戻されている）状態は、滞留の増加が
     // 止まって見えても詰まりそのもの。増加ベースの判定と max を取る。
@@ -243,21 +248,25 @@
       ctx.restore();
     }
 
-    // Particle count / spacing (A-2: 0-50% count grows, 50%〜 spacing narrows).
-    // 詰まり中は容量に対する充填率が低くても列が伸びて詰まって見えるようにする。
+    // 粒数: 流量由来（流れている分）と在庫由来（滞留している分）の大きい方。
+    // 在庫0でも流量があれば粒は出るし、流量0でも在庫があれば粒は残る。
+    const flowCount = flowRatio > 0 ? Math.max(1, Math.round(MAX_PARTICLES_PER_LANE * flowRatio)) : 0;
     const fillCount = fillRatio <= 0.001 ? 0
       : fillRatio < 0.5 ? Math.max(1, Math.round(MAX_PARTICLES_PER_LANE * (fillRatio / 0.5)))
         : MAX_PARTICLES_PER_LANE;
     const jamCount = jamLevel > 0 ? Math.round(MAX_PARTICLES_PER_LANE * (0.5 + 0.5 * jamLevel)) : 0;
-    const count = fillRatio <= 0.001 ? 0 : Math.max(fillCount, jamCount);
+    const count = Math.max(flowCount, fillCount, jamCount);
     const fillCompression = fillRatio < 0.5 ? 0 : Math.min(1, (fillRatio - 0.5) / 0.4);
     const compression = Math.max(fillCompression, jamLevel);
     const packedLength = geometry.length * (1 - 0.45 * compression);
 
-    // 流量は上流装置の utilization を連続量として写像する。詰まるほど遅くなり、
-    // 上流が完全停止していれば止まる。
+    // 粒の速さは流量（個/秒）由来。流量0なら在庫が残っていても粒は動かない。
+    // 詰まり（在庫由来）は減速として重ねる。
+    const flowSpeedScale = flowRatio > 0
+      ? MIN_FLOW_SPEED_SCALE + (1 - MIN_FLOW_SPEED_SCALE) * flowRatio
+      : 0;
     const jamScale = upstreamHalted ? 0 : 1 - 0.65 * jamLevel;
-    pool.scroll += dtSeconds * BASE_PARTICLE_SPEED * upstreamMotion * jamScale;
+    pool.scroll += dtSeconds * BASE_PARTICLE_SPEED * flowSpeedScale * jamScale;
 
     if (count === 0) return;
     const spacing = packedLength / count;
@@ -596,20 +605,20 @@
       fillRatio: state.buffers.A / state.capacities.A,
       jamLevel: updateJamLevel('bufferA', state.buffers.A, dtSeconds),
       upstreamStatus: shown.collection,
-      upstreamMotion: motion.collection,
+      flowPerSecond: state.throughput.collection,
     }, 'raw', config.stageTypes.collection, dtSeconds, timeSeconds);
     drawLane('bufferB', LANES.bufferB, {
       fillRatio: state.buffers.B / state.capacities.B,
       jamLevel: updateJamLevel('bufferB', state.buffers.B, dtSeconds),
       upstreamStatus: shown.processing,
-      upstreamMotion: motion.processing,
+      flowPerSecond: state.throughput.processing,
     }, 'product', config.stageTypes.processing, dtSeconds, timeSeconds);
     if (state.secondaryProcessor.purchased) {
       drawLane('refined', LANES.refined, {
         fillRatio: state.secondaryProcessor.refinedProducts / state.secondaryProcessor.refinedCapacity,
         jamLevel: updateJamLevel('refined', state.secondaryProcessor.refinedProducts, dtSeconds),
         upstreamStatus: shown.secondary,
-        upstreamMotion: motion.secondary,
+        flowPerSecond: state.throughput.secondary,
       }, 'refined', null, dtSeconds, timeSeconds);
     }
 
