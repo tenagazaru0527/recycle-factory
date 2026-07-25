@@ -18,8 +18,11 @@
 
   // 論理座標系。キャンバスの実ピクセルは devicePixelRatio でスケールする（V-7）。
   const WIDTH = mainCanvas.width;
-  const HEIGHT = mainCanvas.height;
-  const GROUND_Y = Math.round(HEIGHT * 0.47); // V-5: 接地線はキャンバス高の 42〜52%
+  // 背景インフラ（MS3-3）が入るまでは床の空白が広すぎるため、キャンバス高を詰める。
+  // index.html は触らず、renderer 側で高さ属性を詰める。
+  const HEIGHT = 320;
+  mainCanvas.height = HEIGHT;
+  const GROUND_Y = Math.round(HEIGHT * 0.52); // V-5: 接地線はキャンバス高の 42〜52%
   const MAX_DPR = 2; // V-7: devicePixelRatio は最大 2.0 に制限
 
   /*
@@ -40,6 +43,7 @@
       machineTop: '#4E545B',
       machineFront: '#3D4249',
       machineDeep: '#2F3339',
+      structure: '#2A2E33', // 柱と梁。装置本体（L 0.26〜0.33）より暗く置いて前後関係を出す
       edgeLight: '#646A72',
       edgeShadow: '#151719',
       laneFrame: '#26292E',
@@ -213,7 +217,9 @@
   // A-5 出荷の出口表現
   const EXIT_PARTICLES_PER_UNIT = 0.6;
   const EXIT_PARTICLE_SPEED = 70;
-  const EXIT_PARTICLE_LIFE = 1.1;
+  const EXIT_PARTICLE_LIFE = 0.7;
+  const EXIT_FADE_START_X = 742; // ここから先はフェードし、境界で切れて見えないようにする
+  const EXIT_REMOVE_X = 766;
   const INCOME_WINDOW_MS = 400;
   const INCOME_POPUP_LIFE = 1.4;
 
@@ -223,14 +229,14 @@
   const MACHINES = {
     collection: { x: 40, y: GROUND_Y - 70, w: 96, h: 70, label: '採取' },
     processing: { x: 330, y: GROUND_Y - 70, w: 96, h: 70, label: '加工' },
-    shipping: { x: 620, y: GROUND_Y - 70, w: 110, h: 70, label: '出荷' },
-    secondary: { x: 436, y: GROUND_Y + 66, w: 96, h: 58, label: '二次加工' },
+    shipping: { x: 606, y: GROUND_Y - 70, w: 110, h: 70, label: '出荷' },
+    secondary: { x: 436, y: GROUND_Y + 62, w: 96, h: 58, label: '二次加工' },
   };
   const LANE_Y = GROUND_Y - 35;
   const LANES = {
     bufferA: { from: [136, LANE_Y], to: [330, LANE_Y] },
-    bufferB: { from: [426, LANE_Y], to: [620, LANE_Y] },
-    refined: { from: [532, GROUND_Y + 66], to: [640, GROUND_Y - 12] },
+    bufferB: { from: [426, LANE_Y], to: [606, LANE_Y] },
+    refined: { from: [532, GROUND_Y + 62], to: [626, GROUND_Y - 12] },
   };
 
   const LIGHT_ANGLE = -15 * (Math.PI / 180); // V-4: 光源は真上やや左に固定
@@ -251,7 +257,7 @@
   const exitParticles = [];
   let exitSpawnCarry = 0;
   const incomePopups = [];
-  const incomeWindow = { sinceMs: 0, score: null, units: 0 };
+  const incomeWindow = { sinceMs: 0, score: null, units: 0, gained: 0 };
 
   function displayedStatus(slot, actual, nowMs) {
     const hold = statusHold[slot] || (statusHold[slot] = { shown: actual, since: nowMs });
@@ -375,20 +381,21 @@
 
     // 中景シルエット（静止・輝度差は僅か）
     g.fillStyle = PALETTE.decor.midground;
-    [[60, 96, 120], [220, 64, 84], [500, 110, 104], [690, 70, 130]].forEach(([x, w, h]) => {
+    [[60, 96, 108], [220, 64, 76], [500, 110, 96], [676, 70, 116]].forEach(([x, w, h]) => {
       g.fillRect(x, GROUND_Y - h, w, h);
     });
 
-    // 柱と梁: 装置の大きさを比較する基準（V-5）
-    g.fillStyle = PALETTE.decor.machineDeep;
-    [186, 466, 752].forEach((x) => g.fillRect(x, 0, 22, GROUND_Y));
-    g.fillRect(0, 22, WIDTH, 14);
-    g.fillStyle = blackVeil(0.28);
-    [186, 466, 752].forEach((x) => g.fillRect(x + 16, 0, 6, GROUND_Y));
-    g.fillRect(0, 34, WIDTH, 3);
-    g.fillStyle = whiteVeil(0.05);
-    [186, 466, 752].forEach((x) => g.fillRect(x, 0, 2, GROUND_Y));
-    g.fillRect(0, 22, WIDTH, 1);
+    // 柱と梁: 装置の大きさを比較する基準（V-5）。装飾なので装置より暗い側に置く
+    const pillars = [186, 466, 744];
+    g.fillStyle = PALETTE.decor.structure;
+    pillars.forEach((x) => g.fillRect(x, 0, 22, GROUND_Y));
+    g.fillRect(0, 20, WIDTH, 13);
+    g.fillStyle = blackVeil(0.34); // 陰面は更に落として奥行きを付ける
+    pillars.forEach((x) => g.fillRect(x + 15, 0, 7, GROUND_Y));
+    g.fillRect(0, 30, WIDTH, 3);
+    g.fillStyle = whiteVeil(0.03); // ハイライトは輪郭が分かる程度に留める
+    pillars.forEach((x) => g.fillRect(x, 0, 1, GROUND_Y));
+    g.fillRect(0, 20, WIDTH, 1);
 
     const floor = g.createLinearGradient(0, GROUND_Y, 0, HEIGHT);
     floor.addColorStop(0, PALETTE.decor.floorFar);
@@ -906,14 +913,16 @@
       const particle = exitParticles[index];
       particle.age += dtSeconds;
       particle.x += EXIT_PARTICLE_SPEED * dtSeconds;
-      if (particle.age >= EXIT_PARTICLE_LIFE || particle.x > WIDTH) exitParticles.splice(index, 1);
+      if (particle.age >= EXIT_PARTICLE_LIFE || particle.x > EXIT_REMOVE_X) exitParticles.splice(index, 1);
     }
   }
 
   function drawExitParticles() {
     exitParticles.forEach((particle) => {
       fxCtx.save();
-      fxCtx.globalAlpha = Math.max(0, 1 - particle.age / EXIT_PARTICLE_LIFE);
+      const fadeByAge = 1 - particle.age / EXIT_PARTICLE_LIFE;
+      const fadeByEdge = 1 - Math.max(0, particle.x - EXIT_FADE_START_X) / (EXIT_REMOVE_X - EXIT_FADE_START_X);
+      fxCtx.globalAlpha = Math.max(0, Math.min(fadeByAge, fadeByEdge));
       drawSingleParticle(fxCtx, particle.refined ? 'refined' : 'product', particle.stageType, particle.x, particle.y, 5);
       fxCtx.restore();
     });
@@ -926,17 +935,18 @@
     }
     incomeWindow.units += state.throughput.shipping * dtSeconds;
     if (nowMs - incomeWindow.sinceMs >= INCOME_WINDOW_MS) {
-      const gained = state.score - incomeWindow.score;
-      const units = incomeWindow.units;
-      if (gained > 0.01) {
+      incomeWindow.gained += state.score - incomeWindow.score;
+      incomeWindow.score = state.score;
+      incomeWindow.sinceMs = nowMs;
+      // 1個に満たない窓は出さずに次へ繰り越す（「+1 / 0個」を出さないため）
+      if (incomeWindow.units >= 1 && incomeWindow.gained > 0.01) {
         const popup = incomePopups[0] ?? {};
-        popup.text = `+${Math.round(gained)} / ${Math.round(units)}個`;
+        popup.text = `+${Math.round(incomeWindow.gained)} / ${Math.floor(incomeWindow.units)}個`;
         popup.age = 0;
         if (incomePopups.length === 0) incomePopups.push(popup);
+        incomeWindow.units -= Math.floor(incomeWindow.units);
+        incomeWindow.gained = 0;
       }
-      incomeWindow.score = state.score;
-      incomeWindow.units = 0;
-      incomeWindow.sinceMs = nowMs;
     }
     for (let index = incomePopups.length - 1; index >= 0; index -= 1) {
       incomePopups[index].age += dtSeconds;
