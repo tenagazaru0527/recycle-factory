@@ -232,3 +232,7 @@ button:hover { background: #39414a; }
   background: #1f2429;
   white-space: nowrap;
 }
+
+/* 滞留が容量に近づいたときの着色（度合いの提示のみ。投資の示唆はしない） */
+#state dd[data-level="warn"] { color: #d9a441; }
+#state dd[data-level="danger"] { color: #e05252; }
