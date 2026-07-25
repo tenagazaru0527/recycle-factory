@@ -11,11 +11,12 @@
       <header class="app-header">
         <h1>Recycle Factory Debug UI</h1>
         <div class="controls">
-          <button type="button" data-action="start">開始</button>
-          <button type="button" data-action="stop">停止</button>
+          <button type="button" data-action="start">開始<kbd class="keycap">Space</kbd></button>
+          <button type="button" data-action="stop">停止<kbd class="keycap">Space</kbd></button>
           <button type="button" data-action="advance">10秒進める</button>
           <button type="button" data-action="reset">リセット</button>
         </div>
+        <div id="speed" class="controls" aria-label="倍速"></div>
         <p id="message" role="status"></p>
       </header>
       <section class="panel panel-view">

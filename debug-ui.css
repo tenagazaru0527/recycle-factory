@@ -236,3 +236,32 @@ button:hover { background: #39414a; }
 /* 滞留が容量に近づいたときの着色（度合いの提示のみ。投資の示唆はしない） */
 #state dd[data-level="warn"] { color: #d9a441; }
 #state dd[data-level="danger"] { color: #e05252; }
+
+/* キー割り当ての常設表示（デバッグUIのみ）。状態に依存しない固定表示 */
+.keycap {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 5px;
+  border: 1px solid #545c66;
+  border-bottom-width: 2px;
+  border-radius: 3px;
+  background: #23272c;
+  color: #9aa0a8;
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 16px;
+  vertical-align: middle;
+}
+
+/* 倍速: 現在の倍率が分かるよう、選択中のボタンを反転させる */
+#speed button[data-active="true"] {
+  background: #d7dce2;
+  border-color: #d7dce2;
+  color: #1b1e22;
+}
+
+#speed button[data-active="true"] .keycap {
+  border-color: #6b7480;
+  background: #eef1f4;
+  color: #41474e;
+}
