@@ -7,10 +7,15 @@ const messageElement = document.querySelector('#message');
 const secondaryElement = document.querySelector('#secondary');
 const conditionsElement = document.querySelector('#conditions');
 const noticeElement = document.querySelector('#notice');
+const speedElement = document.querySelector('#speed');
 let game = core.createGame();
 window.debugGame = game; // renderer.js draws this game as a pure projection
 let timerId = null;
 let noticeTimerId = null;
+// 倍速: setInterval の間隔は config.tickMs のまま、1回の発火で N tick 進める。
+// 固定100msティックの前提を崩さないための方式。
+const SPEEDS = [1, 2, 5, 10];
+let speed = 1;
 // §3.5 の自動購入は game-core 内で無言に成立するため、UI側で前回描画時点の
 // purchased と比較して成立を検出する（game-core にイベント機構は足さない）。
 let previousPurchased = game.state.secondaryProcessor.purchased;
@@ -19,6 +24,15 @@ const NOTICE_DURATION_MS = 12000;
 
 function format(value) {
   return Number(value).toFixed(2);
+}
+
+// ボタンに対応キーを小さく表示する（デバッグUIなので常設表示でよい）。
+// 表示はゲーム状態に依存しない固定の割り当て。
+function keyCap(key) {
+  const cap = document.createElement('kbd');
+  cap.className = 'keycap';
+  cap.textContent = key;
+  return cap;
 }
 
 function showMessage(message) {
@@ -33,8 +47,37 @@ function runTicks(ticks) {
 
 function startRun() {
   if (timerId || game.state.finished) return;
-  timerId = window.setInterval(() => runTicks(1), game.config.tickMs);
+  timerId = window.setInterval(() => runTicks(speed), game.config.tickMs);
   showMessage('実行中');
+}
+
+function toggleRun() {
+  if (timerId) stopRun();
+  else startRun();
+}
+
+function setSpeed(next) {
+  if (!SPEEDS.includes(next)) return;
+  speed = next;
+  if (timerId) {
+    // 実行中は間隔を変えずに tick 数だけ変える（インターバルを張り直す）
+    window.clearInterval(timerId);
+    timerId = window.setInterval(() => runTicks(speed), game.config.tickMs);
+  }
+  renderSpeed();
+  showMessage(`倍速 ×${speed}`);
+}
+
+function renderSpeed() {
+  speedElement.replaceChildren(...SPEEDS.map((value, index) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.dataset.speed = String(value);
+    if (value === speed) button.dataset.active = 'true';
+    button.append(`×${value}`, keyCap(String(index + 1)));
+    button.addEventListener('click', () => setSpeed(value));
+    return button;
+  }));
 }
 
 function stopRun(message = '停止中') {
@@ -111,12 +154,20 @@ const SLOT_GLYPHS = {
  */
 const EFFECT_MARKS = { new: '⚡', upgrade: '⏳' };
 
+// キー割り当て（固定）。マウスを使わずに1ランを操作できるようにするためのもの。
+const INVEST_KEYS = {
+  new: { collection: 'Q', processing: 'W', shipping: 'E', bufferA: 'R', bufferB: 'T' },
+  upgrade: { collection: 'A', processing: 'S', shipping: 'D' },
+};
+const RESERVE_KEYS = { 0.25: 'Z', 0.5: 'X' };
+const CANCEL_RESERVE_KEY = 'C';
+
 function investmentButton(action, slot, cost) {
   const glyph = SLOT_GLYPHS[slot];
   const mark = action === 'new' ? '＋1' : '⬆';
   const button = document.createElement('button');
   button.type = 'button';
-  button.textContent = `${glyph.icon} ${mark}${EFFECT_MARKS[action]} (${format(cost)})`;
+  button.append(`${glyph.icon} ${mark}${EFFECT_MARKS[action]} (${format(cost)})`, keyCap(INVEST_KEYS[action][slot]));
   button.title = action === 'new'
     ? `${glyph.where}を1つ増やす。⚡処理量がすぐに増える（コスト ${format(cost)}）`
     // 立ち上がり時間は game-core の実効値（シナジー・補正で変わる）を UI で再計算せず、
@@ -140,7 +191,10 @@ function renderInvestments() {
     game.config.secondaryProcessorReserveRates.forEach((rate) => {
       const button = document.createElement('button');
       button.type = 'button';
-      button.textContent = `◆ 二次加工器 予約 単価×${game.config.secondaryProcessorPriceMultiplier} ↧${rate * 100}% (${format(game.config.secondaryProcessorCost)})`;
+      button.append(
+        `◆ 二次加工器 予約 単価×${game.config.secondaryProcessorPriceMultiplier} ↧${rate * 100}% (${format(game.config.secondaryProcessorCost)})`,
+        keyCap(RESERVE_KEYS[rate]),
+      );
       button.title = `出荷収入の${rate * 100}%を積み立てて二次加工器を購入する。`
         + `精錬品の単価は${game.config.secondaryProcessorPriceMultiplier}倍になるが、`
         + `積立中は収入の${rate * 100}%が天引きされる（必要額 ${format(game.config.secondaryProcessorCost)}）`;
@@ -150,7 +204,7 @@ function renderInvestments() {
   } else if (secondary.reserved) {
     const button = document.createElement('button');
     button.type = 'button';
-    button.textContent = '◆ 二次加工器 予約解除';
+    button.append('◆ 二次加工器 予約解除', keyCap(CANCEL_RESERVE_KEY));
     button.title = '積立を中止し、積み立てた分を所持金へ戻す';
     button.addEventListener('click', cancelReservation);
     investmentsElement.append(button);
@@ -321,6 +375,54 @@ function render() {
   renderInvestments();
 }
 
+// キーボード操作: マウス移動をなくすことが目的。入力欄にフォーカスがあるときは無効。
+function isTypingTarget(target) {
+  if (!target || !target.tagName) return false;
+  return target.isContentEditable
+    || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName);
+}
+
+document.addEventListener('keydown', (event) => {
+  if (event.ctrlKey || event.metaKey || event.altKey || event.repeat) return;
+  if (isTypingTarget(event.target)) return;
+
+  // Space はフォーカス中のボタンを再実行してしまうため、既定動作を止める
+  if (event.code === 'Space') {
+    event.preventDefault();
+    toggleRun();
+    return;
+  }
+
+  const key = event.key.length === 1 ? event.key.toUpperCase() : event.key;
+  const speedIndex = ['1', '2', '3', '4'].indexOf(key);
+  if (speedIndex >= 0) {
+    event.preventDefault();
+    setSpeed(SPEEDS[speedIndex]);
+    return;
+  }
+
+  const action = Object.keys(INVEST_KEYS)
+    .find((name) => Object.values(INVEST_KEYS[name]).includes(key));
+  if (action) {
+    event.preventDefault();
+    const slot = Object.keys(INVEST_KEYS[action]).find((name) => INVEST_KEYS[action][name] === key);
+    purchase(action, slot);
+    return;
+  }
+
+  const rate = Object.keys(RESERVE_KEYS).find((value) => RESERVE_KEYS[value] === key);
+  if (rate) {
+    event.preventDefault();
+    reserveSecondary(Number(rate));
+    return;
+  }
+
+  if (key === CANCEL_RESERVE_KEY) {
+    event.preventDefault();
+    cancelReservation();
+  }
+});
+
 document.querySelector('[data-action="start"]').addEventListener('click', startRun);
 document.querySelector('[data-action="stop"]').addEventListener('click', () => stopRun());
 document.querySelector('[data-action="advance"]').addEventListener('click', () => runTicks(100));
@@ -336,5 +438,6 @@ document.querySelector('[data-action="reset"]').addEventListener('click', () => 
   render();
 });
 
+renderSpeed();
 showMessage('停止中');
 render();
