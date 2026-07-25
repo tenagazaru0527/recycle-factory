@@ -195,6 +195,12 @@
   const fxCtx = scaleForDpr(fxCanvas);
 
   const MAX_PARTICLES_PER_LANE = 12; // A-1: 最大表示粒数（1粒=N個の代表表示）
+  // V-6 設備バンク方式: 台数は「バンク（設備群）」に集約する。1台＝1オブジェクトで並べない。
+  const ROOMS_PER_BANK = 10; // 1バンク = 最大10室
+  const MAX_BANKS = 3; // バンク上限は3基（30室）
+  const MAX_LANES = 3; // 搬送レーンの多重化は最大3本
+  const MAX_PARTICLES_TOTAL = 120; // 粒の同時描画数の上限（固定）
+  const LANE_OFFSETS = [0, -13, 13]; // 多重化したレーンの垂直オフセット
   // A-1: 粒の「数・流れる速さ」は流量（個/秒）由来、「密集・滞留・停止」は在庫由来。
   const FLOW_REFERENCE_PER_SECOND = 6;
   const MIN_FLOW_SPEED_SCALE = 0.3;
@@ -218,8 +224,8 @@
   const EXIT_PARTICLES_PER_UNIT = 0.6;
   const EXIT_PARTICLE_SPEED = 70;
   const EXIT_PARTICLE_LIFE = 0.7;
-  const EXIT_FADE_START_X = 742; // ここから先はフェードし、境界で切れて見えないようにする
-  const EXIT_REMOVE_X = 766;
+  const EXIT_FADE_START_X = 720; // ここから先はフェードし、境界で切れて見えないようにする
+  const EXIT_REMOVE_X = 752; // canvas 右端（780）まで 28px の余白を残す
   const INCOME_WINDOW_MS = 400;
   const INCOME_POPUP_LIFE = 1.4;
 
@@ -258,6 +264,7 @@
   let exitSpawnCarry = 0;
   const incomePopups = [];
   const incomeWindow = { sinceMs: 0, score: null, units: 0, gained: 0 };
+  let particleBudget = MAX_PARTICLES_TOTAL; // 毎フレーム先頭でリセットする
 
   function displayedStatus(slot, actual, nowMs) {
     const hold = statusHold[slot] || (statusHold[slot] = { shown: actual, since: nowMs });
@@ -423,9 +430,7 @@
     g.fillStyle = whiteVeil(0.06);
     g.fillRect(0, GROUND_Y, WIDTH, 1);
 
-    // 精錬レーンは二次加工器の購入後にだけ見せるので、背景には焼かない
-    bakeLaneBed(g, 'bufferA', LANES.bufferA);
-    bakeLaneBed(g, 'bufferB', LANES.bufferB);
+    // レーン床は多重化で本数が変わるため背景には焼かず、レーンごとのスプライトを重ねる
 
     // ビネット（四隅・黒 α0.35）は静的に焼く
     const vignette = g.createRadialGradient(WIDTH / 2, HEIGHT * 0.45, HEIGHT * 0.25, WIDTH / 2, HEIGHT * 0.5, WIDTH * 0.72);
@@ -444,11 +449,12 @@
 
   // V-4: 搬送レーンは一本線ではなく多層構造
   // （下部フレーム / ベルト面 / 下側影 / ローラー継ぎ目 / 上辺ハイライト1px）
-  function bakeLaneBed(g, name, lane) {
+  function bakeLaneBed(g, name, lane, offset = 0) {
     const geometry = laneGeometry(lane);
     g.save();
     g.translate(geometry.fromX, geometry.fromY);
     g.rotate(geometry.angle);
+    g.translate(0, offset);
     const length = geometry.length;
 
     g.fillStyle = PALETTE.decor.laneFrame; // 下部フレーム
@@ -479,17 +485,25 @@
 
   const machineSprites = {};
   const SPRITE_PAD = 18;
-  let refinedLaneSprite = null;
+  const laneSprites = {}; // `${name}:${offsetIndex}` -> baked bed (V-7: 毎フレームは drawImage 1回)
 
-  // 精錬レーンの床は購入後にだけ描く。焼いたものを1回 drawImage する。
-  function bakeRefinedLane() {
+  // レーン床は本数ごとに1回だけ焼き、毎フレームは drawImage で重ねる。
+  function laneSprite(name, lane, offsetIndex) {
+    const key = `${name}:${offsetIndex}`;
+    if (laneSprites[key]) return laneSprites[key];
     const sprite = document.createElement('canvas');
     sprite.width = Math.round(WIDTH * dpr);
     sprite.height = Math.round(HEIGHT * dpr);
     const g = sprite.getContext('2d');
     g.scale(dpr, dpr);
-    bakeLaneBed(g, 'refined', LANES.refined);
+    bakeLaneBed(g, name, lane, LANE_OFFSETS[offsetIndex]);
+    laneSprites[key] = sprite;
     return sprite;
+  }
+
+  // V-6: 台数からバンク数を出す。上限を超えた分は密度と流速で表す（外形は増やさない）。
+  function bankCount(machineCount) {
+    return Math.min(MAX_BANKS, Math.max(1, Math.ceil(machineCount / ROOMS_PER_BANK)));
   }
 
   function bakeMachineSprite(machine) {
@@ -635,58 +649,113 @@
     ctx.fillRect(gx + gw * Math.max(0, sweep - 0.25), gy, gw * Math.min(0.25, sweep), 7);
   }
 
-  function drawCountDots(machine, count) {
-    ctx.fillStyle = PALETTE.decor.edgeLight;
-    const shown = Math.min(count, 8);
-    for (let index = 0; index < shown; index += 1) {
-      ctx.beginPath();
-      ctx.arc(machine.x + 10 + index * 9, machine.y + machine.h - 20, 2.5, 0, Math.PI * 2);
-      ctx.fill();
-    }
+  /*
+   * V-6 設備バンク方式。台数はバンク（最大3基）と室（1バンク10室）で表す。
+   * 室は単なるドットにせず、処理室＋可動部＋1pxハイライトを持ち、位相をずらす。
+   * 状態はバンク全体（ランプ・稼働バー・辺）で示し、室を状態色で塗らない（V-2）。
+   * 台数が30室を超えても外形は増やさない（V-8-5）。数値ラベルも描かない（V-8-6）。
+   */
+  function bankLayout(machine) {
+    const left = machine.x + 7;
+    const right = machine.x + machine.w - 7;
+    const top = machine.y + 13;
+    const bottom = machine.y + machine.h - 14; // 稼働バーの上まで
+    return { left, top, width: right - left, height: bottom - top };
   }
 
-  function drawCollection(machine, stageType, phase) {
-    drawMachineBody(machine, 'collection');
-    const cx = machine.x + machine.w / 2;
-    const cy = machine.y + machine.h / 2 - 4;
-    ctx.strokeStyle = PALETTE.material[stageType];
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.arc(cx, cy, 16, 0, Math.PI * 2);
-    for (let index = 0; index < 3; index += 1) {
-      const angle = phase + (index * Math.PI * 2) / 3;
-      ctx.moveTo(cx, cy);
-      ctx.lineTo(cx + 16 * Math.cos(angle), cy + 16 * Math.sin(angle));
-    }
-    ctx.stroke();
-  }
+  /*
+   * 室の可動部は工程が違っても「使う面積」を揃える。
+   * 面積が違うと（例: 加工だけ塗り、採取は細線）「加工だけ動いている」と誤読される。
+   * 可動部は装飾色の1px線に統一し、系統（素材色）は各室で同じ大きさの小さな印だけに使う。
+   */
+  const ROOM_TICK_SIZE = 2; // 系統色を使う面積は全工程で同一
 
-  function drawProcessing(machine, stageType, phase) {
-    drawMachineBody(machine, 'processing');
-    const plateY = machine.y + 16 + Math.abs(Math.sin(phase)) * (machine.h - 46);
-    ctx.fillStyle = PALETTE.material[stageType];
-    ctx.fillRect(machine.x + 16, plateY, machine.w - 32, 7);
-    ctx.strokeStyle = blackVeil(0.4);
-    ctx.lineWidth = 1;
-    ctx.strokeRect(machine.x + 16, machine.y + 12, machine.w - 32, machine.h - 34);
-  }
-
-  function drawShipping(machine, phase) {
-    drawMachineBody(machine, 'shipping');
-    const beltY = machine.y + machine.h / 2 - 4;
+  function drawRoomMotion(kind, roomX, roomY, roomW, roomH, phase) {
     ctx.strokeStyle = PALETTE.decor.edgeLight;
-    ctx.lineWidth = 3;
-    ctx.setLineDash([8, 6]);
-    ctx.lineDashOffset = -phase * 20;
+    ctx.lineWidth = 1;
+    const innerLeft = roomX + 1.5;
+    const innerRight = roomX + roomW - 1.5;
     ctx.beginPath();
-    ctx.moveTo(machine.x + 10, beltY);
-    ctx.lineTo(machine.x + machine.w - 24, beltY);
+    if (kind === 'rotor') {
+      const cx = roomX + roomW / 2;
+      const cy = roomY + roomH / 2;
+      const radius = Math.min(roomW, roomH) * 0.32;
+      ctx.moveTo(cx - Math.cos(phase) * radius, cy - Math.sin(phase) * radius);
+      ctx.lineTo(cx + Math.cos(phase) * radius, cy + Math.sin(phase) * radius);
+    } else if (kind === 'press') {
+      const travel = (roomH - 6) * Math.abs(Math.sin(phase));
+      ctx.moveTo(innerLeft, roomY + 3 + travel);
+      ctx.lineTo(innerRight, roomY + 3 + travel);
+    } else {
+      const offset = (phase * 6) % 6;
+      for (let x = innerLeft - offset; x < innerRight; x += 6) {
+        ctx.moveTo(Math.max(innerLeft, x), roomY + roomH / 2);
+        ctx.lineTo(Math.min(x + 3, innerRight), roomY + roomH / 2);
+      }
+    }
     ctx.stroke();
-    ctx.setLineDash([]);
+  }
+
+  function drawBanks(machine, machineCount, motionKind, accent, phase) {
+    const banks = bankCount(machineCount);
+    const occupied = Math.min(machineCount, ROOMS_PER_BANK * MAX_BANKS);
+    const layout = bankLayout(machine);
+    const bankHeight = layout.height / MAX_BANKS;
+    const roomWidth = layout.width / ROOMS_PER_BANK;
+
+    for (let bank = 0; bank < banks; bank += 1) {
+      const bankY = layout.top + bank * bankHeight;
+      // バンクの筐体（凹んだ棚）。装飾色のみで、状態色は使わない
+      ctx.fillStyle = blackVeil(0.3);
+      ctx.fillRect(layout.left, bankY, layout.width, bankHeight - 2);
+      ctx.fillStyle = whiteVeil(0.05);
+      ctx.fillRect(layout.left, bankY, layout.width, 1);
+
+      for (let room = 0; room < ROOMS_PER_BANK; room += 1) {
+        const index = bank * ROOMS_PER_BANK + room;
+        const roomX = layout.left + room * roomWidth;
+        const roomY = bankY + 1;
+        const roomW = roomWidth - 1;
+        const roomH = bankHeight - 4;
+        if (index >= occupied) {
+          // 空きスロットは暗い凹みのまま（増設で埋まっていくことが分かる）
+          ctx.fillStyle = blackVeil(0.22);
+          ctx.fillRect(roomX, roomY, roomW, roomH);
+          continue;
+        }
+        ctx.fillStyle = PALETTE.decor.machineFront;
+        ctx.fillRect(roomX, roomY, roomW, roomH);
+        ctx.fillStyle = whiteVeil(0.08); // 室ごとの1pxハイライト
+        ctx.fillRect(roomX, roomY, roomW, 1);
+        ctx.fillStyle = PALETTE.decor.edgeShadow;
+        ctx.fillRect(roomX + roomW - 1, roomY, 1, roomH);
+        // 系統の印は全工程で同じ大きさ・同じ位置（面積を揃えて誤読を防ぐ）
+        ctx.fillStyle = accent;
+        ctx.fillRect(roomX + 1, roomY + roomH - ROOM_TICK_SIZE - 1, ROOM_TICK_SIZE, ROOM_TICK_SIZE);
+        // 室ごとに動作位相をずらす
+        drawRoomMotion(motionKind, roomX, roomY, roomW, roomH, phase + index * 0.6);
+      }
+    }
+  }
+
+  function drawCollection(machine, stageType, count, phase) {
+    drawMachineBody(machine, 'collection');
+    drawBanks(machine, count, 'rotor', PALETTE.material[stageType], phase);
+  }
+
+  function drawProcessing(machine, stageType, count, phase) {
+    drawMachineBody(machine, 'processing');
+    drawBanks(machine, count, 'press', PALETTE.material[stageType], phase);
+  }
+
+  function drawShipping(machine, stageType, count, phase) {
+    drawMachineBody(machine, 'shipping');
+    drawBanks(machine, count, 'belt', PALETTE.material[stageType], phase);
+    const beltY = machine.y + machine.h - 22;
     ctx.fillStyle = PALETTE.decor.edgeLight;
     ctx.beginPath();
-    ctx.moveTo(machine.x + machine.w - 22, beltY - 8);
-    ctx.lineTo(machine.x + machine.w - 22, beltY + 8);
+    ctx.moveTo(machine.x + machine.w - 20, beltY - 6);
+    ctx.lineTo(machine.x + machine.w - 20, beltY + 6);
     ctx.lineTo(machine.x + machine.w - 8, beltY);
     ctx.closePath();
     ctx.fill();
@@ -834,6 +903,14 @@
     const geometry = laneGeometry(lane);
     const pool = pools[name];
     const { fillRatio, upstreamStatus, flowPerSecond } = flow;
+    // V-6: レーンの多重化は最大3本。以降は粒の密度と流速で表し、描画数を増やさない
+    const laneCount = Math.min(MAX_LANES, Math.max(1, flow.laneCount ?? 1));
+    // 垂直方向のオフセット（レーン本数ぶん）
+    const offsets = LANE_OFFSETS.slice(0, laneCount);
+    offsets.forEach((offset, index) => {
+      ctx.drawImage(laneSprite(name, lane, index), 0, 0, WIDTH, HEIGHT);
+    });
+    const perpendicular = (offset) => [-geometry.unitY * offset, geometry.unitX * offset];
     const flowRatio = Math.min(1, Math.max(0, flowPerSecond) / FLOW_REFERENCE_PER_SECOND);
     const upstreamHalted = isHalted(upstreamStatus);
     const saturated = fillRatio >= 0.999 || upstreamStatus === 'blocked';
@@ -847,8 +924,11 @@
       ctx.lineWidth = 14 + 4 * jamLevel;
       ctx.lineCap = 'butt';
       ctx.beginPath();
-      ctx.moveTo(geometry.fromX, geometry.fromY);
-      ctx.lineTo(geometry.fromX + geometry.unitX * geometry.length, geometry.fromY + geometry.unitY * geometry.length);
+      offsets.forEach((offset) => {
+        const [ox, oy] = perpendicular(offset);
+        ctx.moveTo(geometry.fromX + ox, geometry.fromY + oy);
+        ctx.lineTo(geometry.fromX + geometry.unitX * geometry.length + ox, geometry.fromY + geometry.unitY * geometry.length + oy);
+      });
       ctx.stroke();
       ctx.restore();
     }
@@ -858,7 +938,7 @@
       ctx.save();
       ctx.translate(geometry.fromX, geometry.fromY);
       ctx.rotate(geometry.angle);
-      ctx.fillRect(-3, -14, 6, 28);
+      offsets.forEach((offset) => ctx.fillRect(-3, offset - 14, 6, 28));
       ctx.restore();
     }
 
@@ -879,18 +959,30 @@
     pool.scroll += dtSeconds * BASE_PARTICLE_SPEED * flowSpeedScale * jamScale;
 
     if (count === 0) return;
-    const spacing = packedLength / count;
+    // 粒の同時描画数は全体で MAX_PARTICLES_TOTAL に収める（V-6）
+    const perLane = Math.max(1, Math.round(count / laneCount));
+    const budgeted = Math.min(perLane * laneCount, particleBudget);
+    particleBudget -= budgeted;
+    if (budgeted <= 0) return;
+
+    const spacing = packedLength / perLane;
     const packedStart = geometry.length - packedLength;
     const points = [];
-    for (let index = 0; index < count; index += 1) {
-      const particle = pool.particles[index];
-      const along = packedStart + ((particle.slot * spacing) + pool.scroll) % packedLength;
-      const bob = Math.sin(timeSeconds * 3 + particle.bobPhase) * 1.5;
-      points.push([
-        geometry.fromX + geometry.unitX * along,
-        geometry.fromY + geometry.unitY * along + bob - 2,
-      ]);
-    }
+    let drawn = 0;
+    offsets.forEach((offset, laneIndex) => {
+      const [ox, oy] = perpendicular(offset);
+      for (let index = 0; index < perLane && drawn < budgeted; index += 1) {
+        const particle = pool.particles[index];
+        const laneShift = (laneIndex * spacing) / laneCount; // レーンごとに位相をずらす
+        const along = packedStart + ((particle.slot * spacing) + laneShift + pool.scroll) % packedLength;
+        const bob = Math.sin(timeSeconds * 3 + particle.bobPhase + laneIndex) * 1.5;
+        points.push([
+          geometry.fromX + geometry.unitX * along + ox,
+          geometry.fromY + geometry.unitY * along + oy + bob - 2,
+        ]);
+        drawn += 1;
+      }
+    });
     drawParticleBatch(ctx, kind, stageType, points, 5);
   }
 
@@ -1041,6 +1133,7 @@
     const timeSeconds = nowMs / 1000;
     ctx.clearRect(0, 0, WIDTH, HEIGHT); // 背景は焼き込み済みの下層が担当する
     fxCtx.clearRect(0, 0, WIDTH, HEIGHT);
+    particleBudget = MAX_PARTICLES_TOTAL;
 
     const shown = {
       collection: displayedStatus('collection', state.statuses.collection, nowMs),
@@ -1064,21 +1157,22 @@
       jamLevel: updateJamLevel('bufferA', state.buffers.A, dtSeconds),
       upstreamStatus: shown.collection,
       flowPerSecond: state.throughput.collection,
+      laneCount: bankCount(state.machines.collection),
     }, 'raw', config.stageTypes.collection, dtSeconds, timeSeconds);
     drawLane('bufferB', LANES.bufferB, {
       fillRatio: state.buffers.B / state.capacities.B,
       jamLevel: updateJamLevel('bufferB', state.buffers.B, dtSeconds),
       upstreamStatus: shown.processing,
       flowPerSecond: state.throughput.processing,
+      laneCount: bankCount(state.machines.processing),
     }, 'product', config.stageTypes.processing, dtSeconds, timeSeconds);
     if (state.secondaryProcessor.purchased) {
-      if (!refinedLaneSprite) refinedLaneSprite = bakeRefinedLane();
-      ctx.drawImage(refinedLaneSprite, 0, 0, WIDTH, HEIGHT);
       drawLane('refined', LANES.refined, {
         fillRatio: state.secondaryProcessor.refinedProducts / state.secondaryProcessor.refinedCapacity,
         jamLevel: updateJamLevel('refined', state.secondaryProcessor.refinedProducts, dtSeconds),
         upstreamStatus: shown.secondary,
         flowPerSecond: state.throughput.secondary,
+        laneCount: 1,
       }, 'refined', null, dtSeconds, timeSeconds);
     }
 
@@ -1092,18 +1186,15 @@
       shipping: restraintOf('shipping', state),
     };
 
-    drawCollection(MACHINES.collection, config.stageTypes.collection, animPhases.collection);
-    drawCountDots(MACHINES.collection, state.machines.collection);
+    drawCollection(MACHINES.collection, config.stageTypes.collection, state.machines.collection, animPhases.collection);
     applyStatusDecoration(MACHINES.collection, shown.collection, 'raw', config.stageTypes.collection, timeSeconds);
     drawUtilizationMeter(MACHINES.collection, state.utilization.collection);
 
-    drawProcessing(MACHINES.processing, config.stageTypes.processing, animPhases.processing);
-    drawCountDots(MACHINES.processing, state.machines.processing);
+    drawProcessing(MACHINES.processing, config.stageTypes.processing, state.machines.processing, animPhases.processing);
     applyStatusDecoration(MACHINES.processing, shown.processing, 'product', config.stageTypes.processing, timeSeconds);
     drawUtilizationMeter(MACHINES.processing, state.utilization.processing);
 
-    drawShipping(MACHINES.shipping, animPhases.shipping);
-    drawCountDots(MACHINES.shipping, state.machines.shipping);
+    drawShipping(MACHINES.shipping, config.stageTypes.processing, state.machines.shipping, animPhases.shipping);
     applyStatusDecoration(MACHINES.shipping, shown.shipping, 'product', config.stageTypes.processing, timeSeconds);
     drawUtilizationMeter(MACHINES.shipping, state.utilization.shipping);
 
