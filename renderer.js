@@ -52,6 +52,18 @@
   const JAM_FULL_SECONDS = 10; // ここで詰まり表現が最大になる
   const JAM_RELEASE_RATE = 3; // 滞留が減り始めたときの解除の速さ（倍率）
 
+  // 抑制理由: utilization がこれ未満なら「抑えられている」とみなす（完全停止でなくても）
+  const RESTRAINT_UTILIZATION = 0.95;
+  const OUTPUT_PRESSURE_RATIO = 0.5; // 出口側バッファがこれ以上なら出口待ち
+  const INPUT_SHORTAGE_RATIO = 0.15; // 入力側バッファがこれ以下なら材料待ち
+
+  // A-5 出荷の出口表現: 出荷粒が工場外へ抜ける演出と、収入の時間集約表示
+  const EXIT_PARTICLES_PER_UNIT = 0.6; // 出荷1個あたりの表示粒数
+  const EXIT_PARTICLE_SPEED = 70; // px/s
+  const EXIT_PARTICLE_LIFE = 1.1; // 秒
+  const INCOME_WINDOW_MS = 400; // 収入表示の集約幅（A-5: 100〜500ms）
+  const INCOME_POPUP_LIFE = 1.4; // 秒
+
   // 稼働メーター: 全装置に同じ計器を置き、utilization を目盛りで示す。
   // 律速段は「振り切れ（メーター満杯）」として相対的に読ませる。文字ラベルは置かない。
   const METER_FULL_UTILIZATION = 0.98; // これ以上を振り切れとして形で示す
@@ -81,6 +93,10 @@
   const animPhases = { collection: 0, processing: 0, shipping: 0, secondary: 0 };
   const jamTrackers = {}; // lane -> { smoothed, growingSeconds }
   let hoveredMachine = null; // マウスオーバー時だけ補足テキストを出す（常設しない）
+  const exitParticles = []; // 出荷口から工場外へ抜ける粒（表示専用）
+  let exitSpawnCarry = 0;
+  const incomePopups = []; // 集約した収入の表示（一定時間で消える）
+  const incomeWindow = { sinceMs: 0, score: null, units: 0 };
 
   function displayedStatus(slot, actual, nowMs) {
     const hold = statusHold[slot] || (statusHold[slot] = { shown: actual, since: nowMs });
@@ -113,6 +129,21 @@
     else tracker.growingSeconds = Math.max(0, tracker.growingSeconds - dtSeconds * JAM_RELEASE_RATE);
     const span = JAM_FULL_SECONDS - JAM_ONSET_SECONDS;
     return Math.min(1, Math.max(0, (tracker.growingSeconds - JAM_ONSET_SECONDS) / span));
+  }
+
+  // 低稼働の理由を公開状態から求める。材料待ち（上流不足）か出口待ち（下流飽和）か。
+  // 採取の入力（採取源）と出荷の出力（工場外）は無限なので、その側は理由になりえない。
+  function restraintOf(slot, state) {
+    const utilization = state.utilization[slot];
+    if (utilization === undefined || utilization >= RESTRAINT_UTILIZATION) return null;
+    const level = Math.min(1, 1 - utilization);
+    const ratioA = state.buffers.A / state.capacities.A;
+    const ratioB = state.buffers.B / state.capacities.B;
+    const inputRatio = { collection: null, processing: ratioA, shipping: ratioB }[slot];
+    const outputRatio = { collection: ratioA, processing: ratioB, shipping: null }[slot];
+    if (outputRatio !== null && outputRatio >= OUTPUT_PRESSURE_RATIO) return { side: 'output', level };
+    if (inputRatio !== null && inputRatio <= INPUT_SHORTAGE_RATIO) return { side: 'input', level };
+    return null;
   }
 
   function darken(hex, factor) {
@@ -489,30 +520,156 @@
     drawParticle(kind, stageType, x, y - 6 + spill, 4); // 縁からこぼれる1粒
   }
 
-  // 全装置共通の稼働メーター。utilization を目盛りで示し、律速段は振り切れとして
-  // 相対的に読ませる（文字ラベルは置かない）。
+  // 全装置共通の稼働メーター。装置本体の下端に埋め込み、視線が装置から離れない
+  // 位置に置く。utilization を目盛りで示し、律速段は振り切れとして相対的に読ませる
+  // （文字ラベルは置かない）。
   function drawUtilizationMeter(machine, utilization) {
-    const width = machine.w - 16;
-    const x = machine.x + 8;
-    const y = machine.y + machine.h + 22; // 装置ラベルの下に置く
+    const width = machine.w - 12;
+    const x = machine.x + 6;
+    const y = machine.y + machine.h - 11; // 本体内に埋め込む
     const ratio = Math.min(1, Math.max(0, utilization));
+    ctx.save();
+    ctx.fillStyle = 'rgba(10, 12, 14, 0.55)';
+    ctx.fillRect(x, y, width, 7);
     ctx.strokeStyle = PALETTE.laneEdge;
     ctx.lineWidth = 1;
-    ctx.strokeRect(x, y, width, 6);
+    ctx.strokeRect(x, y, width, 7);
     ctx.fillStyle = ratio >= METER_FULL_UTILIZATION ? PALETTE.lampBlocked : PALETTE.lampStarved;
-    ctx.fillRect(x + 1, y + 1, Math.max(0, (width - 2) * ratio), 4);
+    ctx.fillRect(x + 1, y + 1, Math.max(0, (width - 2) * ratio), 5);
     ctx.fillStyle = PALETTE.laneEdge;
-    ctx.fillRect(x + width / 2, y - 2, 1, 2); // 50%の目盛り
+    ctx.fillRect(x + width / 2, y, 1, 2); // 50%の目盛り
+    ctx.restore();
     if (ratio >= METER_FULL_UTILIZATION) {
-      // 振り切れ: 針が右端を超えた形（色に依存しない差分）
+      // 振り切れ: 針が本体の右端を超えた形（色に依存しない差分）
       ctx.fillStyle = PALETTE.lampBlocked;
       ctx.beginPath();
-      ctx.moveTo(x + width + 2, y);
-      ctx.lineTo(x + width + 9, y + 3);
-      ctx.lineTo(x + width + 2, y + 6);
+      ctx.moveTo(machine.x + machine.w, y);
+      ctx.lineTo(machine.x + machine.w + 8, y + 3.5);
+      ctx.lineTo(machine.x + machine.w, y + 7);
       ctx.closePath();
       ctx.fill();
     }
+  }
+
+  // 抑制理由（部分的な低稼働）: 完全停止と同じ受け皿の語彙を、小さく淡い形で出す。
+  // side='input' は材料待ち（上流不足）、side='output' は出口待ち（下流飽和）。
+  function drawRestraintHint(machine, side, level, kind, stageType, timeSeconds) {
+    // 搬送路（装置の中心高さ）と重ならないよう、少し下にずらして置く
+    const x = side === 'input' ? machine.x - 14 : machine.x + machine.w + 14;
+    const y = machine.y + machine.h / 2 + 18;
+    const scale = 0.62;
+    const pulse = 0.6 + 0.4 * Math.sin(timeSeconds * 3);
+    ctx.save();
+    ctx.globalAlpha = Math.min(0.9, 0.25 + 0.65 * level) * pulse;
+    ctx.strokeStyle = side === 'input' ? PALETTE.lampStarved : PALETTE.lampBlocked;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(x - 9 * scale, y - 5 * scale);
+    ctx.lineTo(x - 7 * scale, y + 5 * scale);
+    ctx.lineTo(x + 7 * scale, y + 5 * scale);
+    ctx.lineTo(x + 9 * scale, y - 5 * scale);
+    ctx.stroke();
+    if (side === 'input') {
+      ctx.setLineDash([2, 3]); // 空きぎみ = 破線の水面
+      ctx.beginPath();
+      ctx.moveTo(x - 6 * scale, y + 2 * scale);
+      ctx.lineTo(x + 6 * scale, y + 2 * scale);
+      ctx.stroke();
+      ctx.restore();
+      return;
+    }
+    ctx.restore();
+    ctx.save();
+    ctx.globalAlpha = Math.min(0.95, 0.35 + 0.6 * level);
+    drawParticle(kind, stageType, x - 3, y + 1, 3); // 出口に溜まりかけの粒
+    drawParticle(kind, stageType, x + 3, y + 1, 3);
+    ctx.restore();
+  }
+
+  // A-5: 出荷口を抜けて工場外へ出る粒。流量（個/秒）から生成する表示専用の粒。
+  function updateExitParticles(state, dtSeconds, stageType) {
+    const machine = MACHINES.shipping;
+    exitSpawnCarry += state.throughput.shipping * dtSeconds * EXIT_PARTICLES_PER_UNIT;
+    while (exitSpawnCarry >= 1) {
+      exitSpawnCarry -= 1;
+      exitParticles.push({
+        x: machine.x + machine.w - 6,
+        y: machine.y + machine.h / 2 + (Math.random() - 0.5) * 10,
+        age: 0,
+        refined: state.throughput.secondary > 0 && Math.random() < 0.4,
+        stageType,
+      });
+    }
+    for (let index = exitParticles.length - 1; index >= 0; index -= 1) {
+      const particle = exitParticles[index];
+      particle.age += dtSeconds;
+      particle.x += EXIT_PARTICLE_SPEED * dtSeconds;
+      if (particle.age >= EXIT_PARTICLE_LIFE || particle.x > canvas.width) exitParticles.splice(index, 1);
+    }
+  }
+
+  function drawExitParticles() {
+    exitParticles.forEach((particle) => {
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, 1 - particle.age / EXIT_PARTICLE_LIFE);
+      drawParticle(particle.refined ? 'refined' : 'product', particle.stageType, particle.x, particle.y, 5);
+      ctx.restore();
+    });
+  }
+
+  // A-5: 収入は 400ms 単位に集約して「+金額 / N個」を短時間だけ出す（常設しない）。
+  function updateIncomePopups(state, nowMs, dtSeconds) {
+    if (incomeWindow.score === null) {
+      incomeWindow.score = state.score;
+      incomeWindow.sinceMs = nowMs;
+    }
+    incomeWindow.units += state.throughput.shipping * dtSeconds;
+    if (nowMs - incomeWindow.sinceMs >= INCOME_WINDOW_MS) {
+      const gained = state.score - incomeWindow.score;
+      const units = incomeWindow.units;
+      if (gained > 0.01) {
+        incomePopups.push({ text: `+${Math.round(gained)} / ${Math.round(units)}個`, age: 0 });
+      }
+      incomeWindow.score = state.score;
+      incomeWindow.units = 0;
+      incomeWindow.sinceMs = nowMs;
+    }
+    for (let index = incomePopups.length - 1; index >= 0; index -= 1) {
+      incomePopups[index].age += dtSeconds;
+      if (incomePopups[index].age >= INCOME_POPUP_LIFE) incomePopups.splice(index, 1);
+    }
+  }
+
+  function drawIncomePopups() {
+    const machine = MACHINES.shipping;
+    ctx.font = 'bold 12px sans-serif';
+    ctx.textAlign = 'right'; // canvas 右端からはみ出さないように右寄せ
+    incomePopups.forEach((popup) => {
+      const progress = popup.age / INCOME_POPUP_LIFE;
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, 1 - progress);
+      ctx.fillStyle = PALETTE.lampRunning;
+      ctx.fillText(popup.text, machine.x + machine.w, machine.y - 6 - progress * 18);
+      ctx.restore();
+    });
+  }
+
+  // 二次加工器: 精錬品在庫が0でも「精錬している」ことが見えるよう、本体内で
+  // 製品 → 精錬品の変換を描く。
+  function drawRefiningMotion(machine, stageType, phase) {
+    const cy = machine.y + machine.h / 2;
+    const left = machine.x + 16;
+    const right = machine.x + machine.w - 16;
+    drawParticle('product', stageType, left, cy, 4);
+    drawParticle('refined', null, right, cy, 4);
+    const travel = (Math.sin(phase) + 1) / 2;
+    ctx.save();
+    ctx.globalAlpha = 0.85;
+    ctx.fillStyle = PALETTE.refined.edge;
+    ctx.beginPath();
+    ctx.arc(left + (right - left) * travel, cy - 12, 2.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
   }
 
   function applyStatusDecoration(machine, status, kind, stageType, timeSeconds) {
@@ -622,6 +779,24 @@
       }, 'refined', null, dtSeconds, timeSeconds);
     }
 
+    // A-5: 出荷口から工場外へ抜ける粒と、集約した収入表示
+    updateExitParticles(state, dtSeconds, config.stageTypes.processing);
+    updateIncomePopups(state, nowMs, dtSeconds);
+    drawExitParticles();
+
+    const stageKinds = {
+      collection: ['raw', config.stageTypes.collection],
+      processing: ['product', config.stageTypes.processing],
+      shipping: ['product', config.stageTypes.processing],
+    };
+
+    // 低稼働の理由（材料待ち / 出口待ち）。完全停止していなくても読み取れるようにする。
+    const restraints = {
+      collection: restraintOf('collection', state),
+      processing: restraintOf('processing', state),
+      shipping: restraintOf('shipping', state),
+    };
+
     drawCollection(MACHINES.collection, config.stageTypes.collection, shown.collection, animPhases.collection);
     drawCountDots(MACHINES.collection, state.machines.collection);
     applyStatusDecoration(MACHINES.collection, shown.collection, 'raw', config.stageTypes.collection, timeSeconds);
@@ -637,8 +812,19 @@
     applyStatusDecoration(MACHINES.shipping, shown.shipping, 'product', config.stageTypes.processing, timeSeconds);
     drawUtilizationMeter(MACHINES.shipping, state.utilization.shipping);
 
+    ['collection', 'processing', 'shipping'].forEach((slot) => {
+      const restraint = restraints[slot];
+      // 完全停止時は停止の語彙（受け皿・溢れる粒）が出るので、抑制ヒントは重ねない
+      if (!restraint || isHalted(shown[slot])) return;
+      drawRestraintHint(MACHINES[slot], restraint.side, restraint.level,
+        stageKinds[slot][0], stageKinds[slot][1], timeSeconds);
+    });
+
     if (state.secondaryProcessor.purchased) {
       drawSecondary(MACHINES.secondary, shown.secondary, animPhases.secondary);
+      if (state.throughput.secondary > 0) {
+        drawRefiningMotion(MACHINES.secondary, config.stageTypes.processing, animPhases.secondary);
+      }
       if (shown.secondary) {
         applyStatusDecoration(MACHINES.secondary, shown.secondary, 'refined', null, timeSeconds);
       }
@@ -647,6 +833,7 @@
       drawUtilizationMeter(MACHINES.secondary, shown.secondary === 'running' ? 1 : 0);
     }
 
+    drawIncomePopups();
     updateHoverTooltip(state);
   }
 
