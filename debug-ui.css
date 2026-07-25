@@ -214,3 +214,21 @@ button:hover { background: #39414a; }
 }
 
 #notice[hidden] { display: none; }
+
+/* ラン条件（シナジー・周回補正）は内部名でなく効果をバッジで出す */
+#conditions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.condition-badge {
+  border: 1px solid #414952;
+  border-radius: 999px;
+  padding: 1px 9px;
+  font-size: 12px;
+  color: #b9c0c8;
+  background: #1f2429;
+  white-space: nowrap;
+}

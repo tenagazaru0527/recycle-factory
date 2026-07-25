@@ -5,6 +5,7 @@ const stateElement = document.querySelector('#state');
 const investmentsElement = document.querySelector('#investments');
 const messageElement = document.querySelector('#message');
 const secondaryElement = document.querySelector('#secondary');
+const conditionsElement = document.querySelector('#conditions');
 const noticeElement = document.querySelector('#notice');
 let game = core.createGame();
 window.debugGame = game; // renderer.js draws this game as a pure projection
@@ -42,13 +43,31 @@ function stopRun(message = '停止中') {
   showMessage(message);
 }
 
+// game-core のエラーは英語かつ生の数値なので、UI側で日本語と丸めた金額に置き換える。
+// （game-core を変更しないため、メッセージ本文には手を入れていない）
+const ERROR_MESSAGES = {
+  'Secondary processor is already purchased': '二次加工器は購入済みです',
+  'Secondary processor is already reserved': '二次加工器はすでに予約中です',
+  'Secondary processor is not reserved': '二次加工器は予約されていません',
+};
+
+function describeError(error, cost) {
+  if (/^Insufficient money/.test(error.message)) {
+    return cost === undefined
+      ? `所持金が足りません（所持 ${format(game.state.money)}）`
+      : `所持金が足りません（必要 ${format(cost)} / 所持 ${format(game.state.money)}）`;
+  }
+  return ERROR_MESSAGES[error.message] ?? error.message;
+}
+
 function purchase(action, slot) {
+  const cost = action === 'new' ? core.calculateNewCost(game, slot) : core.calculateUpgradeCost(game, slot);
   try {
     if (action === 'new') core.buyNew(game, slot);
     else core.buyUpgrade(game, slot);
     showMessage('購入しました');
   } catch (error) {
-    showMessage(error.message);
+    showMessage(describeError(error, cost));
   }
   render();
 }
@@ -58,7 +77,7 @@ function reserveSecondary(rate) {
     core.reserveSecondaryProcessor(game, rate);
     showMessage(`予約しました（天引き${rate * 100}%）`);
   } catch (error) {
-    showMessage(error.message);
+    showMessage(describeError(error));
   }
   render();
 }
@@ -68,7 +87,7 @@ function cancelReservation() {
     core.cancelSecondaryReservation(game);
     showMessage('予約を解除しました');
   } catch (error) {
-    showMessage(error.message);
+    showMessage(describeError(error));
   }
   render();
 }
@@ -86,15 +105,24 @@ const SLOT_GLYPHS = {
   bufferB: { icon: '加工 ▸▸ 出荷', where: '加工と出荷のあいだの搬送路' },
 };
 
+/*
+ * 投資の「効果」を示す記号。何を買うべきかは示さない（docs/design.md §4 A-6）。
+ * ⚡ = 効果が即座に出る（新設）、⏳ = 効果が立ち上がるまで時間がかかる（強化）。
+ */
+const EFFECT_MARKS = { new: '⚡', upgrade: '⏳' };
+
 function investmentButton(action, slot, cost) {
   const glyph = SLOT_GLYPHS[slot];
   const mark = action === 'new' ? '＋1' : '⬆';
   const button = document.createElement('button');
   button.type = 'button';
-  button.textContent = `${glyph.icon} ${mark} (${format(cost)})`;
+  button.textContent = `${glyph.icon} ${mark}${EFFECT_MARKS[action]} (${format(cost)})`;
   button.title = action === 'new'
-    ? `${glyph.where}を1つ増やす（コスト ${format(cost)}）`
-    : `${glyph.where}の能力を強化する（コスト ${format(cost)}）`;
+    ? `${glyph.where}を1つ増やす。⚡処理量がすぐに増える（コスト ${format(cost)}）`
+    // 立ち上がり時間は game-core の実効値（シナジー・補正で変わる）を UI で再計算せず、
+    // 「時間がかかる」ことだけを伝える。装置上の充填ゲージ（A-4）が進行を示す。
+    : `${glyph.where}の能力を+${Math.round(game.config.upgradeRateBonus * 100)}%強化する。`
+      + `⏳効果は徐々に立ち上がる（コスト ${format(cost)}）`;
   button.addEventListener('click', () => purchase(action, slot));
   return button;
 }
@@ -112,8 +140,10 @@ function renderInvestments() {
     game.config.secondaryProcessorReserveRates.forEach((rate) => {
       const button = document.createElement('button');
       button.type = 'button';
-      button.textContent = `◆ 二次加工器 予約 ${rate * 100}% (${format(game.config.secondaryProcessorCost)})`;
-      button.title = `出荷収入の${rate * 100}%を積み立てて二次加工器を購入する（必要額 ${format(game.config.secondaryProcessorCost)}）`;
+      button.textContent = `◆ 二次加工器 予約 単価×${game.config.secondaryProcessorPriceMultiplier} ↧${rate * 100}% (${format(game.config.secondaryProcessorCost)})`;
+      button.title = `出荷収入の${rate * 100}%を積み立てて二次加工器を購入する。`
+        + `精錬品の単価は${game.config.secondaryProcessorPriceMultiplier}倍になるが、`
+        + `積立中は収入の${rate * 100}%が天引きされる（必要額 ${format(game.config.secondaryProcessorCost)}）`;
       button.addEventListener('click', () => reserveSecondary(rate));
       investmentsElement.append(button);
     });
@@ -195,19 +225,75 @@ function renderSecondary() {
   previousPurchased = secondary.purchased;
 }
 
+function formatClock(milliseconds) {
+  const total = Math.max(0, Math.round(milliseconds / 1000));
+  const minutes = Math.floor(total / 60);
+  return `${minutes}:${String(total % 60).padStart(2, '0')}`;
+}
+
+function formatFlow(perSecond) {
+  return `${(Math.round(perSecond * 10) / 10).toFixed(1)}/秒`;
+}
+
+// 滞留・在庫は「0.00」ではなく「なし」と出す。0という数字だけだと詰まりの有無が読めない。
+function formatBacklog(amount, capacity, noun = '滞留') {
+  return amount < 0.05
+    ? `${noun}なし`
+    : `${noun} ${format(amount)} / ${format(capacity)}`;
+}
+
+// シナジーと周回補正が「何を有利にしているか」を、内部名ではなく効果で示す。
+function synergyEffect() {
+  const { config } = game;
+  if (game.state.synergy === 'unified') {
+    return `統一 新設 −${Math.round(config.unifiedNewCostDiscount * 100)}% / 立上り ×${config.unifiedRampDurationMultiplier}`;
+  }
+  if (game.state.synergy === 'mixed') {
+    return `混成 単価 +${Math.round(config.mixedUnitPriceBonus * 100)}%`;
+  }
+  return '混在 効果なし';
+}
+
+function modifierEffect() {
+  const { config } = game;
+  const effects = {
+    fastRamp: `補正 立上り ×${config.fastRampDurationMultiplier}`,
+    compactBuffers: `補正 容量 ×${config.compactBufferCapacityMultiplier} / 単価 +${Math.round(config.compactBufferUnitPriceBonus * 100)}%`,
+    gentleNewCosts: `補正 新設の値上がり ${config.newCostGrowth} → ${config.gentleNewCostGrowth}`,
+  };
+  return effects[game.state.roundModifier] ?? '補正なし';
+}
+
+// 現在のラン条件（シナジー・周回補正）をバッジで示す。内部名ではなく効果を出す。
+function renderConditions() {
+  const badges = [
+    { text: synergyEffect(), title: '工程の系統が揃っているか（統一）／すべて異なるか（混成）で変わる効果' },
+    { text: modifierEffect(), title: 'このランに抽選された周回補正の効果' },
+  ].map(({ text, title }) => {
+    const badge = document.createElement('span');
+    badge.className = 'condition-badge';
+    badge.textContent = text;
+    badge.title = title;
+    return badge;
+  });
+  conditionsElement.replaceChildren(...badges);
+}
+
 function render() {
   const { state } = game;
+  const remainingMs = game.config.runDurationMs - state.elapsedMs;
   const rows = [
-    ['経過時間', `${format(state.elapsedMs / 1000)} / ${game.config.runDurationMs / 1000} 秒`],
+    // 残り時間を主表示にする（強化の回収可能性を判断する材料）
+    ['残り時間', `${formatClock(remainingMs)} / ${formatClock(game.config.runDurationMs)}`],
     ['所持金', format(state.money)],
     ['スコア', format(state.score)],
-    // 内部名（bufferA / bufferB）は出さず、搬送路の位置で示す
-    ['採取 ▸▸ 加工', `${format(state.buffers.A)} / ${format(state.capacities.A)}`],
-    ['加工 ▸▸ 出荷', `${format(state.buffers.B)} / ${format(state.capacities.B)}`],
-    ['精錬品', `${format(state.secondaryProcessor.refinedProducts)} / ${format(state.secondaryProcessor.refinedCapacity)}`],
+    // 主表示は流量（個/秒）。在庫は補助として括弧で示す
+    ['採取 ▸▸ 加工', `${formatFlow(state.throughput.collection)}（${formatBacklog(state.buffers.A, state.capacities.A)}）`],
+    ['加工 ▸▸ 出荷', `${formatFlow(state.throughput.processing)}（${formatBacklog(state.buffers.B, state.capacities.B)}）`],
+    ['出荷 ▸▸ 工場外', formatFlow(state.throughput.shipping)],
+    ['精錬', `${formatFlow(state.throughput.secondary)}（${formatBacklog(state.secondaryProcessor.refinedProducts, state.secondaryProcessor.refinedCapacity, '在庫')}）`],
     // 二次加工器の積立は「二次加工器」パネルへ移設（テキスト1行に埋もれさせない）
     ['採取 / 加工 / 出荷', `${state.statuses.collection} / ${state.statuses.processing} / ${state.statuses.shipping}`],
-    ['シナジー / 補正', `${state.synergy} / ${state.roundModifier}`],
   ];
   stateElement.replaceChildren(...rows.flatMap(([label, value]) => {
     const term = document.createElement('dt');
@@ -216,6 +302,7 @@ function render() {
     description.textContent = value;
     return [term, description];
   }));
+  renderConditions();
   renderSecondary();
   renderInvestments();
 }
