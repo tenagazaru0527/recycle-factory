@@ -4,9 +4,17 @@ const core = window.GameCore;
 const stateElement = document.querySelector('#state');
 const investmentsElement = document.querySelector('#investments');
 const messageElement = document.querySelector('#message');
+const secondaryElement = document.querySelector('#secondary');
+const noticeElement = document.querySelector('#notice');
 let game = core.createGame();
 window.debugGame = game; // renderer.js draws this game as a pure projection
 let timerId = null;
+let noticeTimerId = null;
+// §3.5 の自動購入は game-core 内で無言に成立するため、UI側で前回描画時点の
+// purchased と比較して成立を検出する（game-core にイベント機構は足さない）。
+let previousPurchased = game.state.secondaryProcessor.purchased;
+
+const NOTICE_DURATION_MS = 12000;
 
 function format(value) {
   return Number(value).toFixed(2);
@@ -99,6 +107,74 @@ function renderInvestments() {
   }
 }
 
+function showNotice(text) {
+  noticeElement.textContent = text;
+  noticeElement.hidden = false;
+  if (noticeTimerId) window.clearTimeout(noticeTimerId);
+  noticeTimerId = window.setTimeout(() => {
+    noticeElement.hidden = true;
+    noticeTimerId = null;
+  }, NOTICE_DURATION_MS);
+}
+
+function secondaryBadge(secondary) {
+  const badge = document.createElement('span');
+  badge.className = 'secondary-badge';
+  if (secondary.purchased) {
+    badge.dataset.state = 'purchased';
+    badge.textContent = '稼働中';
+  } else if (secondary.reserved) {
+    badge.dataset.state = 'reserved';
+    badge.textContent = `積立中（天引き${secondary.reserveRate * 100}%）`;
+  } else {
+    badge.dataset.state = 'idle';
+    badge.textContent = '未予約';
+  }
+  return badge;
+}
+
+// 未予約 / 予約中 / 購入済み の3状態と、予約中の積立進捗を常時見える形で出す。
+function renderSecondary() {
+  const secondary = game.state.secondaryProcessor;
+  const cost = game.config.secondaryProcessorCost;
+  const header = document.createElement('div');
+  header.className = 'secondary-state';
+  header.append(secondaryBadge(secondary));
+  const children = [header];
+
+  if (secondary.reserved) {
+    const progress = document.createElement('progress');
+    progress.className = 'secondary-progress';
+    progress.max = cost;
+    progress.value = Math.min(secondary.savedAmount, cost);
+    const figures = document.createElement('div');
+    figures.className = 'secondary-figures';
+    const saved = document.createElement('span');
+    saved.textContent = `${format(secondary.savedAmount)} / ${format(cost)}`;
+    const remaining = document.createElement('span');
+    remaining.className = 'secondary-note';
+    remaining.textContent = `残り ${format(Math.max(0, cost - secondary.savedAmount))}`;
+    figures.append(saved, remaining);
+    children.push(progress, figures);
+  } else if (secondary.purchased) {
+    const note = document.createElement('div');
+    note.className = 'secondary-note';
+    note.textContent = `精錬品 ${format(secondary.refinedProducts)} / ${format(secondary.refinedCapacity)}`;
+    children.push(note);
+  } else {
+    const note = document.createElement('div');
+    note.className = 'secondary-note';
+    note.textContent = `必要額 ${format(cost)}`;
+    children.push(note);
+  }
+  secondaryElement.replaceChildren(...children);
+
+  if (secondary.purchased && !previousPurchased) {
+    showNotice('二次加工器が積立完了で購入され、稼働を開始しました');
+  }
+  previousPurchased = secondary.purchased;
+}
+
 function render() {
   const { state } = game;
   const rows = [
@@ -108,9 +184,7 @@ function render() {
     ['bufferA', `${format(state.buffers.A)} / ${format(state.capacities.A)}`],
     ['bufferB', `${format(state.buffers.B)} / ${format(state.capacities.B)}`],
     ['精錬品', `${format(state.secondaryProcessor.refinedProducts)} / ${format(state.secondaryProcessor.refinedCapacity)}`],
-    ['二次加工器 積立', state.secondaryProcessor.reserved
-      ? `${format(state.secondaryProcessor.savedAmount)} / ${format(game.config.secondaryProcessorCost)}（天引き${state.secondaryProcessor.reserveRate * 100}%）`
-      : (state.secondaryProcessor.purchased ? '購入済み' : '未予約')],
+    // 二次加工器の積立は「二次加工器」パネルへ移設（テキスト1行に埋もれさせない）
     ['採取 / 加工 / 出荷', `${state.statuses.collection} / ${state.statuses.processing} / ${state.statuses.shipping}`],
     ['シナジー / 補正', `${state.synergy} / ${state.roundModifier}`],
   ];
@@ -121,6 +195,7 @@ function render() {
     description.textContent = value;
     return [term, description];
   }));
+  renderSecondary();
   renderInvestments();
 }
 
@@ -131,6 +206,10 @@ document.querySelector('[data-action="reset"]').addEventListener('click', () => 
   stopRun();
   game = core.createGame();
   window.debugGame = game;
+  previousPurchased = game.state.secondaryProcessor.purchased;
+  if (noticeTimerId) window.clearTimeout(noticeTimerId);
+  noticeTimerId = null;
+  noticeElement.hidden = true;
   showMessage('リセットしました');
   render();
 });
