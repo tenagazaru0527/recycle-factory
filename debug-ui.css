@@ -22,10 +22,11 @@ body {
   padding: 10px 14px;
   height: 100vh;
   grid-template-columns: minmax(0, 820px) minmax(320px, 1fr);
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto minmax(0, 1fr);
   grid-template-areas:
     "header header"
     "view   status"
+    "view   secondary"
     "view   invest";
 }
 
@@ -33,6 +34,7 @@ body {
 /* 各パネルは内容の高さに合わせる（空の余白は背景として残す） */
 .panel-view { grid-area: view; align-self: start; }
 .panel-status { grid-area: status; align-self: start; }
+.panel-secondary { grid-area: secondary; align-self: start; }
 .panel-invest { grid-area: invest; align-self: start; }
 
 .app-header {
@@ -136,8 +138,79 @@ button:hover { background: #39414a; }
       "header"
       "view"
       "status"
+      "secondary"
       "invest";
   }
 
   .panel { overflow: visible; }
 }
+
+/*
+ * 二次加工器: 積立予約は自動購入で成立するため、進捗が状態一覧のテキスト1行に
+ * 埋もれないよう独立したパネルで常時見せる。
+ */
+.secondary-state {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.secondary-badge {
+  border: 1px solid #414952;
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 12px;
+  color: #9aa0a8;
+}
+
+.secondary-badge[data-state="reserved"] {
+  border-color: #d9a441;
+  color: #d9a441;
+}
+
+.secondary-badge[data-state="purchased"] {
+  border-color: #58c470;
+  color: #58c470;
+}
+
+.secondary-progress {
+  display: block;
+  width: 100%;
+  height: 14px;
+  appearance: none;
+  border: 1px solid #414952;
+  border-radius: 3px;
+  background: #1b1e22;
+}
+
+.secondary-progress::-webkit-progress-bar { background: #1b1e22; }
+.secondary-progress::-webkit-progress-value { background: #d9a441; }
+.secondary-progress::-moz-progress-bar { background: #d9a441; }
+
+.secondary-figures {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.secondary-note { color: #9aa0a8; }
+
+/* 購入通知: 一定時間で消えるが、消えた後もパネルの状態表示で稼働が分かる */
+#notice {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  max-width: 340px;
+  padding: 10px 14px;
+  background: #2f3a2f;
+  border: 1px solid #58c470;
+  border-left-width: 5px;
+  border-radius: 5px;
+  color: #e7f2e7;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+}
+
+#notice[hidden] { display: none; }
