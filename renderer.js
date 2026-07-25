@@ -224,8 +224,8 @@
   const EXIT_PARTICLES_PER_UNIT = 0.6;
   const EXIT_PARTICLE_SPEED = 70;
   const EXIT_PARTICLE_LIFE = 0.7;
-  const EXIT_FADE_START_X = 742; // ここから先はフェードし、境界で切れて見えないようにする
-  const EXIT_REMOVE_X = 766;
+  const EXIT_FADE_START_X = 720; // ここから先はフェードし、境界で切れて見えないようにする
+  const EXIT_REMOVE_X = 752; // canvas 右端（780）まで 28px の余白を残す
   const INCOME_WINDOW_MS = 400;
   const INCOME_POPUP_LIFE = 1.4;
 
@@ -663,31 +663,35 @@
     return { left, top, width: right - left, height: bottom - top };
   }
 
-  function drawRoomMotion(kind, roomX, roomY, roomW, roomH, phase, colour) {
-    ctx.strokeStyle = colour;
+  /*
+   * 室の可動部は工程が違っても「使う面積」を揃える。
+   * 面積が違うと（例: 加工だけ塗り、採取は細線）「加工だけ動いている」と誤読される。
+   * 可動部は装飾色の1px線に統一し、系統（素材色）は各室で同じ大きさの小さな印だけに使う。
+   */
+  const ROOM_TICK_SIZE = 2; // 系統色を使う面積は全工程で同一
+
+  function drawRoomMotion(kind, roomX, roomY, roomW, roomH, phase) {
+    ctx.strokeStyle = PALETTE.decor.edgeLight;
     ctx.lineWidth = 1;
+    const innerLeft = roomX + 1.5;
+    const innerRight = roomX + roomW - 1.5;
+    ctx.beginPath();
     if (kind === 'rotor') {
       const cx = roomX + roomW / 2;
       const cy = roomY + roomH / 2;
-      const radius = Math.min(roomW, roomH) * 0.3;
-      ctx.beginPath();
+      const radius = Math.min(roomW, roomH) * 0.32;
       ctx.moveTo(cx - Math.cos(phase) * radius, cy - Math.sin(phase) * radius);
       ctx.lineTo(cx + Math.cos(phase) * radius, cy + Math.sin(phase) * radius);
-      ctx.stroke();
-      return;
-    }
-    if (kind === 'press') {
-      const travel = (roomH - 5) * Math.abs(Math.sin(phase));
-      ctx.fillStyle = colour;
-      ctx.fillRect(roomX + 1.5, roomY + 2 + travel, roomW - 3, 2);
-      return;
-    }
-    // belt: 室の中央を横に流れる短い破線
-    const offset = (phase * 6) % 6;
-    ctx.beginPath();
-    for (let x = roomX + 1 - offset; x < roomX + roomW - 1; x += 6) {
-      ctx.moveTo(x, roomY + roomH / 2);
-      ctx.lineTo(Math.min(x + 3, roomX + roomW - 1), roomY + roomH / 2);
+    } else if (kind === 'press') {
+      const travel = (roomH - 6) * Math.abs(Math.sin(phase));
+      ctx.moveTo(innerLeft, roomY + 3 + travel);
+      ctx.lineTo(innerRight, roomY + 3 + travel);
+    } else {
+      const offset = (phase * 6) % 6;
+      for (let x = innerLeft - offset; x < innerRight; x += 6) {
+        ctx.moveTo(Math.max(innerLeft, x), roomY + roomH / 2);
+        ctx.lineTo(Math.min(x + 3, innerRight), roomY + roomH / 2);
+      }
     }
     ctx.stroke();
   }
@@ -725,8 +729,11 @@
         ctx.fillRect(roomX, roomY, roomW, 1);
         ctx.fillStyle = PALETTE.decor.edgeShadow;
         ctx.fillRect(roomX + roomW - 1, roomY, 1, roomH);
+        // 系統の印は全工程で同じ大きさ・同じ位置（面積を揃えて誤読を防ぐ）
+        ctx.fillStyle = accent;
+        ctx.fillRect(roomX + 1, roomY + roomH - ROOM_TICK_SIZE - 1, ROOM_TICK_SIZE, ROOM_TICK_SIZE);
         // 室ごとに動作位相をずらす
-        drawRoomMotion(motionKind, roomX, roomY, roomW, roomH, phase + index * 0.6, accent);
+        drawRoomMotion(motionKind, roomX, roomY, roomW, roomH, phase + index * 0.6);
       }
     }
   }
