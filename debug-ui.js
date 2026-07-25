@@ -242,6 +242,16 @@ function formatBacklog(amount, capacity, noun = '滞留') {
     : `${noun} ${format(amount)} / ${format(capacity)}`;
 }
 
+// 容量に近づいた滞留は、数値を読まなくても分かるよう色を変える。
+// 色は「滞留の度合い」だけを示し、どの投資をすべきかは示さない。
+function backlogLevel(amount, capacity) {
+  if (!capacity) return null;
+  const ratio = amount / capacity;
+  if (ratio >= 0.8) return 'danger';
+  if (ratio >= 0.5) return 'warn';
+  return null;
+}
+
 // シナジーと周回補正が「何を有利にしているか」を、内部名ではなく効果で示す。
 function synergyEffect() {
   const { config } = game;
@@ -288,18 +298,22 @@ function render() {
     ['所持金', format(state.money)],
     ['スコア', format(state.score)],
     // 主表示は流量（個/秒）。在庫は補助として括弧で示す
-    ['採取 ▸▸ 加工', `${formatFlow(state.throughput.collection)}（${formatBacklog(state.buffers.A, state.capacities.A)}）`],
-    ['加工 ▸▸ 出荷', `${formatFlow(state.throughput.processing)}（${formatBacklog(state.buffers.B, state.capacities.B)}）`],
+    ['採取 ▸▸ 加工', `${formatFlow(state.throughput.collection)}（${formatBacklog(state.buffers.A, state.capacities.A)}）`,
+      backlogLevel(state.buffers.A, state.capacities.A)],
+    ['加工 ▸▸ 出荷', `${formatFlow(state.throughput.processing)}（${formatBacklog(state.buffers.B, state.capacities.B)}）`,
+      backlogLevel(state.buffers.B, state.capacities.B)],
     ['出荷 ▸▸ 工場外', formatFlow(state.throughput.shipping)],
-    ['精錬', `${formatFlow(state.throughput.secondary)}（${formatBacklog(state.secondaryProcessor.refinedProducts, state.secondaryProcessor.refinedCapacity, '在庫')}）`],
+    ['精錬', `${formatFlow(state.throughput.secondary)}（${formatBacklog(state.secondaryProcessor.refinedProducts, state.secondaryProcessor.refinedCapacity, '在庫')}）`,
+      backlogLevel(state.secondaryProcessor.refinedProducts, state.secondaryProcessor.refinedCapacity)],
     // 二次加工器の積立は「二次加工器」パネルへ移設（テキスト1行に埋もれさせない）
     ['採取 / 加工 / 出荷', `${state.statuses.collection} / ${state.statuses.processing} / ${state.statuses.shipping}`],
   ];
-  stateElement.replaceChildren(...rows.flatMap(([label, value]) => {
+  stateElement.replaceChildren(...rows.flatMap(([label, value, level]) => {
     const term = document.createElement('dt');
     term.textContent = label;
     const description = document.createElement('dd');
     description.textContent = value;
+    if (level) description.dataset.level = level;
     return [term, description];
   }));
   renderConditions();

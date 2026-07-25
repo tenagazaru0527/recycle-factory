@@ -22,6 +22,10 @@
     refined: { fill: '#d9a441', edge: '#f2d38b' },
     shippingBody: '#4a4f55',
     lane: '#3a3f46',
+    // 装置本体は無彩色に統一する。色は状態（稼働 / 抑制 / 停止 / 振り切れ）専用とし、
+    // 系統（金属 / 樹脂 / ガラス）は粒と可動部のアクセントで示す。
+    machineBody: '#41474e',
+    machineEdge: '#585f68',
     laneEdge: '#4a4f55',
     label: '#9aa0a8',
     lampRunning: '#58c470',
@@ -370,9 +374,9 @@
     ctx.fillRect(gx + gw * Math.max(0, sweep - 0.25), gy, gw * Math.min(0.25, sweep), 8);
   }
 
-  function drawMachineBody(machine, bodyColor) {
-    ctx.fillStyle = bodyColor;
-    ctx.strokeStyle = darken(bodyColor.startsWith('#') ? bodyColor : '#4a4f55', 0.6);
+  function drawMachineBody(machine) {
+    ctx.fillStyle = PALETTE.machineBody;
+    ctx.strokeStyle = PALETTE.machineEdge;
     ctx.lineWidth = 1.5;
     ctx.beginPath();
     ctx.roundRect(machine.x, machine.y, machine.w, machine.h, 8);
@@ -395,7 +399,7 @@
   }
 
   function drawCollection(machine, stageType, status, phase) {
-    drawMachineBody(machine, darken(PALETTE[stageType].fill, 0.45));
+    drawMachineBody(machine);
     const cx = machine.x + machine.w / 2;
     const cy = machine.y + machine.h / 2;
     ctx.strokeStyle = PALETTE[stageType].fill;
@@ -413,7 +417,7 @@
   }
 
   function drawProcessing(machine, stageType, status, phase) {
-    drawMachineBody(machine, darken(PALETTE[stageType].fill, 0.45));
+    drawMachineBody(machine);
     const plateY = machine.y + 18 + Math.abs(Math.sin(phase)) * (machine.h - 40);
     ctx.fillStyle = PALETTE[stageType].fill;
     ctx.fillRect(machine.x + 15, plateY, machine.w - 30, 8);
@@ -422,7 +426,7 @@
   }
 
   function drawShipping(machine, status, phase) {
-    drawMachineBody(machine, PALETTE.shippingBody);
+    drawMachineBody(machine);
     const beltY = machine.y + machine.h / 2;
     ctx.strokeStyle = '#767c84';
     ctx.lineWidth = 3;
@@ -443,7 +447,7 @@
   }
 
   function drawSecondary(machine, status, phase) {
-    drawMachineBody(machine, darken(PALETTE.refined.fill, 0.4));
+    drawMachineBody(machine);
     const cx = machine.x + machine.w / 2;
     const cy = machine.y + machine.h / 2;
     ctx.strokeStyle = PALETTE.refined.fill;
@@ -551,38 +555,36 @@
     }
   }
 
-  // 抑制理由（部分的な低稼働）: 完全停止と同じ受け皿の語彙を、小さく淡い形で出す。
-  // side='input' は材料待ち（上流不足）、side='output' は出口待ち（下流飽和）。
-  function drawRestraintHint(machine, side, level, kind, stageType, timeSeconds) {
-    // 搬送路（装置の中心高さ）と重ならないよう、少し下にずらして置く
-    const x = side === 'input' ? machine.x - 14 : machine.x + machine.w + 14;
-    const y = machine.y + machine.h / 2 + 18;
-    const scale = 0.62;
-    const pulse = 0.6 + 0.4 * Math.sin(timeSeconds * 3);
+  // 抑制理由（部分的な低稼働）: 装置の辺そのものを変化させて示す。
+  // 小さな図形は通しプレイで見つけられなかったため、輪郭を語彙にする。
+  // side='input' は左辺（材料待ち）、side='output' は右辺（出口待ち）。
+  function drawRestraintHint(machine, side, level, timeSeconds) {
+    const pulse = 0.65 + 0.35 * Math.sin(timeSeconds * 3);
+    const thickness = 3 + 4 * level;
+    const x = side === 'input' ? machine.x - thickness / 2 : machine.x + machine.w + thickness / 2;
+    const color = side === 'input' ? PALETTE.lampStarved : PALETTE.lampBlocked;
     ctx.save();
-    ctx.globalAlpha = Math.min(0.9, 0.25 + 0.65 * level) * pulse;
-    ctx.strokeStyle = side === 'input' ? PALETTE.lampStarved : PALETTE.lampBlocked;
-    ctx.lineWidth = 1.5;
+    ctx.globalAlpha = Math.min(0.95, 0.4 + 0.55 * level) * pulse;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = thickness;
+    ctx.lineCap = 'butt';
+    // 材料待ちは辺が欠ける（供給が途切れている）、出口待ちは辺が詰まる（連続した帯）
+    if (side === 'input') ctx.setLineDash([6, 5]);
     ctx.beginPath();
-    ctx.moveTo(x - 9 * scale, y - 5 * scale);
-    ctx.lineTo(x - 7 * scale, y + 5 * scale);
-    ctx.lineTo(x + 7 * scale, y + 5 * scale);
-    ctx.lineTo(x + 9 * scale, y - 5 * scale);
+    ctx.moveTo(x, machine.y + 4);
+    ctx.lineTo(x, machine.y + machine.h - 4);
     ctx.stroke();
-    if (side === 'input') {
-      ctx.setLineDash([2, 3]); // 空きぎみ = 破線の水面
-      ctx.beginPath();
-      ctx.moveTo(x - 6 * scale, y + 2 * scale);
-      ctx.lineTo(x + 6 * scale, y + 2 * scale);
-      ctx.stroke();
-      ctx.restore();
-      return;
-    }
-    ctx.restore();
-    ctx.save();
-    ctx.globalAlpha = Math.min(0.95, 0.35 + 0.6 * level);
-    drawParticle(kind, stageType, x - 3, y + 1, 3); // 出口に溜まりかけの粒
-    drawParticle(kind, stageType, x + 3, y + 1, 3);
+    ctx.setLineDash([]);
+    // 辺の向き: 入力側は内向き、出力側は外向きの小さな爪を辺の中央に付ける
+    const cy = machine.y + machine.h / 2;
+    const direction = side === 'input' ? 1 : -1;
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(x + direction * thickness, cy - 6);
+    ctx.lineTo(x + direction * (thickness + 6), cy);
+    ctx.lineTo(x + direction * thickness, cy + 6);
+    ctx.closePath();
+    ctx.fill();
     ctx.restore();
   }
 
@@ -628,7 +630,12 @@
       const gained = state.score - incomeWindow.score;
       const units = incomeWindow.units;
       if (gained > 0.01) {
-        incomePopups.push({ text: `+${Math.round(gained)} / ${Math.round(units)}個`, age: 0 });
+        // 出荷が続くと 400ms ごとに要素が増えて重なるため、常に1つだけ保持し
+        // 直近の集計で置き換える（重なりが起きない）
+        const popup = incomePopups[0] ?? {};
+        popup.text = `+${Math.round(gained)} / ${Math.round(units)}個`;
+        popup.age = 0;
+        if (incomePopups.length === 0) incomePopups.push(popup);
       }
       incomeWindow.score = state.score;
       incomeWindow.units = 0;
@@ -784,12 +791,6 @@
     updateIncomePopups(state, nowMs, dtSeconds);
     drawExitParticles();
 
-    const stageKinds = {
-      collection: ['raw', config.stageTypes.collection],
-      processing: ['product', config.stageTypes.processing],
-      shipping: ['product', config.stageTypes.processing],
-    };
-
     // 低稼働の理由（材料待ち / 出口待ち）。完全停止していなくても読み取れるようにする。
     const restraints = {
       collection: restraintOf('collection', state),
@@ -816,8 +817,7 @@
       const restraint = restraints[slot];
       // 完全停止時は停止の語彙（受け皿・溢れる粒）が出るので、抑制ヒントは重ねない
       if (!restraint || isHalted(shown[slot])) return;
-      drawRestraintHint(MACHINES[slot], restraint.side, restraint.level,
-        stageKinds[slot][0], stageKinds[slot][1], timeSeconds);
+      drawRestraintHint(MACHINES[slot], restraint.side, restraint.level, timeSeconds);
     });
 
     if (state.secondaryProcessor.purchased) {
