@@ -44,6 +44,10 @@
       machineFront: '#3D4249',
       machineDeep: '#2F3339',
       structure: '#2A2E33', // 柱と梁。装置本体（L 0.26〜0.33）より暗く置いて前後関係を出す
+      // 背景インフラ（MS3-3）。装置本体（正面 L 0.263）より暗く保ち、前後関係を崩さない
+      pipe: '#2E3238', // 配管・ダクト本体（L 0.200）
+      pipeShade: '#23262A', // 配管の陰面（L 0.151）
+      rail: '#2B2F34', // キャットウォーク・柵・ケーブルトレイ（L 0.186）
       edgeLight: '#646A72',
       edgeShadow: '#151719',
       laneFrame: '#26292E',
@@ -432,12 +436,130 @@
 
     // レーン床は多重化で本数が変わるため背景には焼かず、レーンごとのスプライトを重ねる
 
+    drawInfrastructure(g, currentInfrastructure);
+
     // ビネット（四隅・黒 α0.35）は静的に焼く
     const vignette = g.createRadialGradient(WIDTH / 2, HEIGHT * 0.45, HEIGHT * 0.25, WIDTH / 2, HEIGHT * 0.5, WIDTH * 0.72);
     vignette.addColorStop(0, blackVeil(0));
     vignette.addColorStop(1, blackVeil(0.35));
     g.fillStyle = vignette;
     g.fillRect(0, 0, WIDTH, HEIGHT);
+  }
+
+  /*
+   * MS3-3 増築: 背景インフラを段階的にアンロックする。
+   * 出現条件は game-core の公開状態（台数・容量・二次加工器）から導き、
+   * 描画側でゲーム計算は行わない。装飾軸（S≤10% / L≤0.42 / source-over）に収め、
+   * 常時動く蒸気・火花・照明点滅は置かない（V-8-7）。静止した構造物だけを足す。
+   * 前景要素は装置・粒・状態表示に重ならない位置に置く。
+   */
+  const MACHINE_TOP = GROUND_Y - 70; // ここより下は装置の領域なので背景を置かない
+  let currentInfrastructure = { pipes: false, ducts: false, catwalk: false, lamps: false, fans: false, tray: false };
+  let bakedInfrastructureKey = '';
+
+  function infrastructureOf(state) {
+    const machines = state.machines.collection + state.machines.processing + state.machines.shipping;
+    const capacity = state.capacities.A + state.capacities.B;
+    return {
+      pipes: machines >= 6,
+      ducts: machines >= 12,
+      catwalk: capacity >= 50,
+      lamps: state.secondaryProcessor.purchased,
+      fans: machines >= 18,
+      tray: capacity >= 70,
+    };
+  }
+
+  function infrastructureKey(infrastructure) {
+    return Object.keys(infrastructure).filter((name) => infrastructure[name]).join(',');
+  }
+
+  function drawPipeRun(g, x, y, length, thickness) {
+    g.fillStyle = PALETTE.decor.pipe;
+    g.fillRect(x, y, length, thickness);
+    g.fillStyle = PALETTE.decor.pipeShade; // 下側の陰
+    g.fillRect(x, y + thickness - 2, length, 2);
+    g.fillStyle = whiteVeil(0.06); // 上端1pxのハイライト（光源は真上やや左）
+    g.fillRect(x, y, length, 1);
+    g.fillStyle = PALETTE.decor.pipeShade; // 継ぎ手
+    for (let jx = x + 24; jx < x + length; jx += 48) g.fillRect(jx, y - 1, 3, thickness + 2);
+  }
+
+  function drawInfrastructure(g, infrastructure) {
+    if (infrastructure.pipes) {
+      drawPipeRun(g, 0, 44, WIDTH, 7);
+      drawPipeRun(g, 0, 56, WIDTH, 4);
+      // 立ち下がり（柱に沿わせる。装置の上端より上で止める）
+      g.fillStyle = PALETTE.decor.pipe;
+      [208, 488].forEach((x) => g.fillRect(x, 51, 5, MACHINE_TOP - 60));
+    }
+    if (infrastructure.ducts) {
+      g.fillStyle = PALETTE.decor.pipe;
+      g.fillRect(40, 62, 300, 14);
+      g.fillRect(430, 62, 300, 14);
+      g.fillStyle = PALETTE.decor.pipeShade;
+      for (let x = 46; x < 730; x += 22) {
+        if (x > 340 && x < 430) continue;
+        g.fillRect(x, 62, 2, 14);
+      }
+      g.fillStyle = whiteVeil(0.05);
+      g.fillRect(40, 62, 300, 1);
+      g.fillRect(430, 62, 300, 1);
+    }
+    if (infrastructure.catwalk) {
+      g.fillStyle = PALETTE.decor.rail;
+      g.fillRect(0, 84, WIDTH, 4); // 通路床
+      g.fillStyle = PALETTE.decor.pipeShade;
+      g.fillRect(0, 88, WIDTH, 2); // 影
+      g.fillStyle = PALETTE.decor.rail; // 手すり（縦桟）
+      for (let x = 12; x < WIDTH; x += 26) g.fillRect(x, 74, 2, 10);
+      g.fillRect(0, 72, WIDTH, 2);
+    }
+    if (infrastructure.lamps) {
+      // 作業灯: 点滅させない。灯具と、壁への静的な光だまりだけを置く
+      [150, 430, 690].forEach((x) => {
+        g.fillStyle = PALETTE.decor.rail;
+        g.fillRect(x - 9, 90, 18, 4);
+        g.fillStyle = PALETTE.decor.pipeShade;
+        g.fillRect(x - 2, 86, 4, 4);
+        const pool = g.createRadialGradient(x, 96, 2, x, 96, 46);
+        pool.addColorStop(0, whiteVeil(0.07));
+        pool.addColorStop(1, whiteVeil(0));
+        g.fillStyle = pool;
+        g.fillRect(x - 46, 92, 92, MACHINE_TOP - 92);
+      });
+    }
+    if (infrastructure.fans) {
+      // 排気ファン: 静止。回転させると粒（情報）と競合するため動かさない
+      [96, 636].forEach((x) => {
+        g.fillStyle = PALETTE.decor.pipe;
+        g.fillRect(x - 16, 10, 32, 32);
+        g.fillStyle = PALETTE.decor.pipeShade;
+        g.beginPath();
+        g.arc(x, 26, 12, 0, Math.PI * 2);
+        g.fill();
+        g.strokeStyle = PALETTE.decor.rail;
+        g.lineWidth = 2;
+        g.beginPath();
+        for (let index = 0; index < 4; index += 1) {
+          const angle = (index * Math.PI) / 2 + 0.4;
+          g.moveTo(x, 26);
+          g.lineTo(x + Math.cos(angle) * 11, 26 + Math.sin(angle) * 11);
+        }
+        g.stroke();
+      });
+    }
+    if (infrastructure.tray) {
+      // 手前のケーブルトレイ: 装置・二次加工器のラベルより下に置く
+      const y = HEIGHT - 13;
+      g.fillStyle = PALETTE.decor.rail;
+      g.fillRect(0, y, WIDTH, 6);
+      g.fillStyle = PALETTE.decor.pipeShade;
+      g.fillRect(0, y + 4, WIDTH, 2);
+      for (let x = 10; x < WIDTH; x += 34) g.fillRect(x, y - 3, 3, 3);
+      g.fillStyle = whiteVeil(0.05);
+      g.fillRect(0, y, WIDTH, 1);
+    }
   }
 
   function laneGeometry(lane) {
@@ -1131,6 +1253,15 @@
   function draw(game, nowMs, dtSeconds) {
     const { state, config } = game;
     const timeSeconds = nowMs / 1000;
+    // アンロックが進んだときだけ背景を焼き直す（毎フレームの再描画はしない）
+    const infrastructure = infrastructureOf(state);
+    const key = infrastructureKey(infrastructure);
+    if (key !== bakedInfrastructureKey) {
+      currentInfrastructure = infrastructure;
+      bakedInfrastructureKey = key;
+      bakeBackground();
+    }
+
     ctx.clearRect(0, 0, WIDTH, HEIGHT); // 背景は焼き込み済みの下層が担当する
     fxCtx.clearRect(0, 0, WIDTH, HEIGHT);
     particleBudget = MAX_PARTICLES_TOTAL;
