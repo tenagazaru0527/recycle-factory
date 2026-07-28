@@ -349,4 +349,79 @@ function closeTo(actual, expected, message) {
   assert.equal(starvedSecondary.state.throughput.secondary, 0, 'starved secondary reports 0 throughput');
 }
 
+// #61 fastClone: simulator のプローブ複製が structuredClone と等価であること
+{
+  const simulator = require('../simulator');
+
+  // 複製の等価性: 初期・進行中・強化あり・予約中・購入済みの各状態で一致すること
+  const shapes = [];
+
+  shapes.push(['initial', createGame({ roundModifier: 'fastRamp' })]);
+
+  const running = createGame({ roundModifier: 'fastRamp' });
+  tick(running, 120);
+  shapes.push(['running', running]);
+
+  const upgraded = createGame({ roundModifier: 'fastRamp' });
+  upgraded.state.money = 10_000;
+  buyNew(upgraded, 'collection');
+  buyNew(upgraded, 'bufferA');
+  buyUpgrade(upgraded, 'processing');
+  buyUpgrade(upgraded, 'processing');
+  tick(upgraded, 45);
+  shapes.push(['upgraded', upgraded]);
+
+  const reserved = createGame({ roundModifier: 'fastRamp' });
+  reserveSecondaryProcessor(reserved, 0.25);
+  tick(reserved, 60);
+  shapes.push(['reserved', reserved]);
+
+  const purchased = createGame({ roundModifier: 'fastRamp' });
+  purchased.state.secondaryProcessor.purchased = true;
+  purchased.state.buffers.B = 5;
+  tick(purchased, 30);
+  shapes.push(['secondaryPurchased', purchased]);
+
+  for (const [label, game] of shapes) {
+    assert.deepStrictEqual(
+      simulator.fastClone(game.state),
+      structuredClone(game.state),
+      `fastClone matches structuredClone (${label})`,
+    );
+    // 複製であること（参照を共有していない）
+    const copy = simulator.fastClone(game.state);
+    copy.buffers.A += 1;
+    copy.upgrades.processing.push({ elapsedMs: 1 });
+    copy.secondaryProcessor.savedAmount += 1;
+    assert.notEqual(copy.buffers.A, game.state.buffers.A, `fastClone copies buffers (${label})`);
+    assert.notEqual(
+      copy.upgrades.processing.length,
+      game.state.upgrades.processing.length,
+      `fastClone copies upgrade lists (${label})`,
+    );
+    assert.notEqual(
+      copy.secondaryProcessor.savedAmount,
+      game.state.secondaryProcessor.savedAmount,
+      `fastClone copies the secondary processor (${label})`,
+    );
+  }
+
+  // 既存戦略のスコアが変わらないこと（プローブを使う bottleneckFollow で比較）
+  const scenario = { strategyName: 'bottleneckFollow', roundModifier: 'fastRamp', bufferCapacity: 20 };
+  const withFastClone = simulator.runScenario(scenario);
+  simulator.setProbeCloneForTests(structuredClone);
+  const withStructuredClone = simulator.runScenario(scenario);
+  simulator.setProbeCloneForTests();
+  assert.equal(
+    withFastClone.score,
+    withStructuredClone.score,
+    'bottleneckFollow scores identically with either clone',
+  );
+  assert.equal(
+    withFastClone.purchases,
+    withStructuredClone.purchases,
+    'bottleneckFollow makes the same purchases with either clone',
+  );
+}
+
 console.log('game-core tests passed');
