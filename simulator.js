@@ -53,8 +53,65 @@ const STRATEGIES = {
   },
 };
 
+/*
+ * プローブ用の複製。状態の形（§3.1）は固定なので、structuredClone の汎用コピーではなく
+ * 手書きで写す。ボトルネック追従戦略は毎tick 3回プローブを作るため、ここが実行コストになる。
+ * config はプローブ側で書き換えないため共有参照のままにする。
+ */
+function fastClone(state) {
+  return {
+    elapsedMs: state.elapsedMs,
+    money: state.money,
+    score: state.score,
+    buffers: { A: state.buffers.A, B: state.buffers.B },
+    capacities: { A: state.capacities.A, B: state.capacities.B },
+    machines: {
+      collection: state.machines.collection,
+      processing: state.machines.processing,
+      shipping: state.machines.shipping,
+    },
+    upgrades: {
+      collection: state.upgrades.collection.map((upgrade) => ({ elapsedMs: upgrade.elapsedMs })),
+      processing: state.upgrades.processing.map((upgrade) => ({ elapsedMs: upgrade.elapsedMs })),
+      shipping: state.upgrades.shipping.map((upgrade) => ({ elapsedMs: upgrade.elapsedMs })),
+    },
+    newPurchaseCounts: { ...state.newPurchaseCounts },
+    statuses: {
+      collection: state.statuses.collection,
+      processing: state.statuses.processing,
+      shipping: state.statuses.shipping,
+      secondary: state.statuses.secondary,
+    },
+    utilization: {
+      collection: state.utilization.collection,
+      processing: state.utilization.processing,
+      shipping: state.utilization.shipping,
+    },
+    throughput: {
+      collection: state.throughput.collection,
+      processing: state.throughput.processing,
+      shipping: state.throughput.shipping,
+      secondary: state.throughput.secondary,
+    },
+    synergy: state.synergy,
+    roundModifier: state.roundModifier,
+    secondaryProcessor: {
+      purchased: state.secondaryProcessor.purchased,
+      refinedProducts: state.secondaryProcessor.refinedProducts,
+      refinedCapacity: state.secondaryProcessor.refinedCapacity,
+      reserved: state.secondaryProcessor.reserved,
+      reserveRate: state.secondaryProcessor.reserveRate,
+      savedAmount: state.secondaryProcessor.savedAmount,
+    },
+    finished: state.finished,
+  };
+}
+
+// テストから複製方式を差し替えるための口。既定は軽量clone。
+let cloneState = fastClone;
+
 function createProbe(game) {
-  return { config: game.config, state: structuredClone(game.state) };
+  return { config: game.config, state: cloneState(game.state) };
 }
 
 function measureEffectiveThroughputs(game) {
@@ -235,9 +292,22 @@ function runAll() {
   };
 }
 
-const output = runAll();
-const logsDirectory = path.join(__dirname, 'logs');
-fs.mkdirSync(logsDirectory, { recursive: true });
-const outputPath = path.join(logsDirectory, 'simulation-results.json');
-fs.writeFileSync(outputPath, `${JSON.stringify(output, null, 2)}\n`);
-console.log(`wrote ${path.relative(process.cwd(), outputPath)}`);
+function writeResults() {
+  const output = runAll();
+  const logsDirectory = path.join(__dirname, 'logs');
+  fs.mkdirSync(logsDirectory, { recursive: true });
+  const outputPath = path.join(logsDirectory, 'simulation-results.json');
+  fs.writeFileSync(outputPath, `${JSON.stringify(output, null, 2)}\n`);
+  console.log(`wrote ${path.relative(process.cwd(), outputPath)}`);
+}
+
+module.exports = {
+  STRATEGIES,
+  fastClone,
+  runScenario,
+  measureEffectiveThroughputs,
+  // テスト専用: プローブの複製方式を差し替える（引数なしで既定の軽量cloneへ戻す）
+  setProbeCloneForTests(clone) { cloneState = clone ?? fastClone; },
+};
+
+if (require.main === module) writeResults();
